@@ -64,6 +64,9 @@ struct editorConfig {
   int linenumbers; // New: 0 for disabled, 1 for enabled
   char *clipboard; // Clipboard content
   int clipboard_len; // Clipboard content length
+  int hl_row;   // Row of the highlighted match
+  int hl_start; // Start column (in render) of the highlighted match
+  int hl_end;   // End column (in render) of the highlighted match
 };
 
 struct editorConfig E;
@@ -79,6 +82,7 @@ void editorSaveAs(); // Added for Save As functionality
 void editorCopyLine();
 void editorCutLine();
 void editorPaste();
+int editorRowRxToCx(erow *row, int rx); // New: Convert render index to char index
 
 /*** terminal ***/
 
@@ -177,6 +181,18 @@ int editorRowCxToRx(erow *row, int cx) {
     rx++;
   }
   return rx;
+}
+
+int editorRowRxToCx(erow *row, int rx) {
+  int cur_rx = 0;
+  int cx;
+  for (cx = 0; cx < row->size; cx++) {
+    if (row->chars[cx] == '\t')
+      cur_rx += (WEE_TAB_STOP - 1) - (cur_rx % WEE_TAB_STOP);
+    cur_rx++;
+    if (cur_rx > rx) return cx;
+  }
+  return cx;
 }
 
 void editorUpdateRow(erow *row) {
@@ -435,34 +451,53 @@ void editorPaste() {
 void editorFindCallback(char *query, int key) {
   static int last_match = -1;
   static int direction = 1;
+  static int saved_hl_row = -1; // To restore highlighting after search
+
+  // Clear highlighting from previous search
+  if (saved_hl_row != -1) {
+    E.hl_row = -1;
+    saved_hl_row = -1;
+  }
 
   if (key == '\r' || key == '\x1b') {
     last_match = -1;
     direction = 1;
+    E.hl_row = -1; // Clear highlighting
     return;
   } else if (key == ARROW_RIGHT || key == ARROW_DOWN) {
     direction = 1;
   } else if (key == ARROW_LEFT || key == ARROW_UP) {
     direction = -1;
   } else {
-    last_match = -1;
+    last_match = -1; // New search query, reset
     direction = 1;
   }
 
-  if (last_match == -1) direction = 1;
+  if (last_match == -1) {
+    direction = 1;
+    last_match = E.cy; // Start search from current cursor position
+  }
+
   int current = last_match;
   int i;
   for (i = 0; i < E.numrows; i++) {
     current += direction;
     if (current == -1) current = E.numrows - 1;
     else if (current == E.numrows) current = 0;
+
     erow *row = &E.row[current];
     char *match = strstr(row->render, query);
     if (match) {
       last_match = current;
       E.cy = current;
-      E.cx = match - row->render;
-      E.rowoff = E.numrows;
+      E.cx = editorRowRxToCx(row, match - row->render); // Convert render index to char index
+      E.rowoff = E.numrows; // Scroll to bottom to ensure visibility
+
+      E.hl_row = current;
+      E.hl_start = match - row->render;
+      E.hl_end = E.hl_start + strlen(query);
+      saved_hl_row = current; // Save for clearing later
+
       editorSetStatusMessage("Search result: %s", query);
       break;
     }
@@ -478,12 +513,16 @@ void editorFind() {
   char *query = editorPrompt("Search: %s (Use ESC/Arrows/Enter)", editorFindCallback);
   if (query) {
     free(query);
+    // If query is not NULL, it means Enter was pressed and a match was found
+    // Do not restore saved cursor position, keep the found position
   } else {
+    // If query is NULL, it means ESC was pressed or no match found
     E.cx = saved_cx;
     E.cy = saved_cy;
     E.coloff = saved_coloff;
     E.rowoff = saved_rowoff;
   }
+  E.hl_row = -1; // Clear highlighting after search
 }
 
 /*** append buffer ***/
@@ -576,7 +615,33 @@ void editorDrawRows(struct abuf *ab) {
       int len = E.row[filerow].rsize - E.coloff;
       if (len < 0) len = 0;
       if (len > E.screencols - linenum_width) len = E.screencols - linenum_width;
-      abAppend(ab, &E.row[filerow].render[E.coloff], len);
+      // Highlighting
+      if (filerow == E.hl_row) {
+        char *c = &E.row[filerow].render[E.coloff];
+        int highlight_len = E.hl_end - E.hl_start;
+
+        // Calculate visible part of highlight
+        int visible_hl_start = E.hl_start;
+        int visible_hl_end = E.hl_end;
+
+        if (visible_hl_start < E.coloff) visible_hl_start = E.coloff;
+        if (visible_hl_end > E.coloff + len) visible_hl_end = E.coloff + len;
+
+        if (visible_hl_start < visible_hl_end) {
+            // Text before highlight
+            abAppend(ab, c, visible_hl_start - E.coloff);
+            // Highlighted text
+            abAppend(ab, "\x1b[7m", 4); // Inverted colors
+            abAppend(ab, &E.row[filerow].render[visible_hl_start], visible_hl_end - visible_hl_start);
+            abAppend(ab, "\x1b[m", 3); // Reset colors
+            // Text after highlight
+            abAppend(ab, &E.row[filerow].render[visible_hl_end], (E.coloff + len) - visible_hl_end);
+        } else {
+            abAppend(ab, c, len);
+        }
+      } else {
+        abAppend(ab, &E.row[filerow].render[E.coloff], len);
+      }
     } else { // This block handles empty lines (~) or welcome message
       if (E.linenumbers) { // Print spaces for line number column if line numbers are enabled
         char spaces[16];
@@ -847,6 +912,9 @@ void initEditor() {
   E.linenumbers = 0; // Initialize line numbers to disabled
   E.clipboard = NULL; // Initialize clipboard
   E.clipboard_len = 0; // Initialize clipboard length
+  E.hl_row = -1; // Initialize highlight
+  E.hl_start = -1;
+  E.hl_end = -1;
   if (getWindowSize(&E.screenrows, &E.screencols) == -1) die("getWindowSize");
   E.screenrows -= 2;
 }
