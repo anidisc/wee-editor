@@ -21,7 +21,7 @@
 
 /* defines */
 
-#define WEE_VERSION "0.5.0"
+#define WEE_VERSION "0.6.0"
 #define WEE_TAB_STOP 8
 #define WEE_QUIT_TIMES 2
 
@@ -81,6 +81,8 @@ char *editorPrompt(char *prompt, void (*callback)(char *, int));
 void editorMoveCursor(int key);
 void editorSave();
 char *editorFileBrowser(const char *initial_path);
+int editorAskToSave();
+void editorNewFile();
 
 /* terminal */
 
@@ -457,6 +459,25 @@ void editorPaste() {
   editorSetStatusMessage("Pasted.");
 }
 
+void editorNewFile() {
+    if (E.dirty && editorAskToSave() == 0) {
+        editorSetStatusMessage("New file aborted.");
+        return;
+    }
+
+    for (int i = 0; i < E.numrows; i++) editorFreeRow(&E.row[i]);
+    free(E.row);
+    E.row = NULL;
+    E.numrows = 0;
+    E.cx = 0; E.cy = 0; E.rowoff = 0; E.coloff = 0;
+
+    free(E.filename);
+    E.filename = NULL;
+    E.dirty = 0;
+
+    editorSetStatusMessage("New empty file. Ctrl-S to save.");
+}
+
 /* find */
 void editorFindCallback(char *query, int key) {
   static int last_match = -1;
@@ -592,7 +613,7 @@ void editorDrawRows(struct abuf *ab) {
     } else {
       if (E.linenumbers) {
         char linenum_buf[16];
-        int len = snprintf(linenum_buf, sizeof(linenum_buf), "%*d ", linenum_width - 1, filerow + 1);
+        int len = snprintf(linenum_buf, sizeof(linenum_buf), "%*d ", linenum_width - 1, filerow + 1); 
         abAppend(ab, "\x1b[36m", 5);
         abAppend(ab, linenum_buf, len);
         abAppend(ab, "\x1b[m", 3);
@@ -770,6 +791,7 @@ void editorProcessKeypress() {
     case CTRL_KEY('k'): editorCutLine(); break;
     case CTRL_KEY('u'): editorPaste(); break;
     case CTRL_KEY('n'): E.linenumbers = !E.linenumbers; break;
+    case CTRL_KEY('t'): editorNewFile(); break;
     case CTRL_KEY('f'): editorFind(); break;
     case BACKSPACE:
     case CTRL_KEY('h'):
@@ -981,7 +1003,7 @@ int main(int argc, char *argv[]) {
     editorOpen(argv[1]);
   }
   editorSetStatusMessage(
-      "HELP: Ctrl-S=save | C-Y=save as | C-O=open | C-Q=quit | C-F=find | C-N=lines | C-W=copy | C-K=cut | C-U=paste");
+      "HELP: C-S=save | C-Y=save as | C-T=new | C-O=open | C-Q=quit | C-F=find | C-N=lines | C-W=copy | C-K=cut | C-U=paste");
   while (1) {
     editorRefreshScreen();
     editorProcessKeypress();
