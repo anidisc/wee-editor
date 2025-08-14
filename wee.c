@@ -61,6 +61,7 @@ struct editorConfig {
   time_t statusmsg_time;
   struct termios orig_termios;
   int dirty;
+  int linenumbers; // New: 0 for disabled, 1 for enabled
 };
 
 struct editorConfig E;
@@ -71,6 +72,7 @@ void editorSetStatusMessage(const char *fmt, ...);
 void editorRefreshScreen();
 char *editorPrompt(char *prompt, void (*callback)(char *, int));
 void editorMoveCursor(int key);
+int editorGetTextCols(); // New: Get effective text columns
 void editorSaveAs(); // Added for Save As functionality
 
 /*** terminal ***/
@@ -444,6 +446,23 @@ void abFree(struct abuf *ab) {
 
 /*** output ***/
 
+int editorGetTextCols() {
+    int text_cols = E.screencols;
+    if (E.linenumbers) {
+        int max_linenum_digits = 1;
+        if (E.numrows > 0) {
+            int temp_num = E.numrows;
+            while (temp_num /= 10) {
+                max_linenum_digits++;
+            }
+        }
+        int linenum_width = max_linenum_digits + 1; // +1 for space separator
+        if (linenum_width < 4) linenum_width = 4; // Minimum width for small files
+        text_cols -= linenum_width;
+    }
+    return text_cols;
+}
+
 void editorScroll() {
   E.rx = 0;
   if (E.cy < E.numrows) {
@@ -455,25 +474,58 @@ void editorScroll() {
   if (E.cy >= E.rowoff + E.screenrows) {
     E.rowoff = E.cy - E.screenrows + 1;
   }
+  int text_cols = editorGetTextCols(); // Use effective text columns
   if (E.rx < E.coloff) {
     E.coloff = E.rx;
   }
-  if (E.rx >= E.coloff + E.screencols) {
-    E.coloff = E.rx - E.screencols + 1;
+  if (E.rx >= E.coloff + text_cols) { // Use effective text columns
+    E.coloff = E.rx - text_cols + 1;
   }
 }
 
 void editorDrawRows(struct abuf *ab) {
   int y;
+  int linenum_width = 0;
+  if (E.linenumbers) {
+    // Calculate width needed for line numbers
+    int max_linenum_digits = 1;
+    if (E.numrows > 0) {
+        int temp_num = E.numrows;
+        while (temp_num /= 10) {
+            max_linenum_digits++;
+        }
+    }
+    linenum_width = max_linenum_digits + 1; // +1 for space separator
+    if (linenum_width < 4) linenum_width = 4; // Minimum width for small files
+  }
+
   for (y = 0; y < E.screenrows; y++) {
     int filerow = y + E.rowoff;
-    if (filerow >= E.numrows) {
+
+    if (filerow < E.numrows) { // This block handles actual file content
+      if (E.linenumbers) {
+        char linenum_buf[16];
+        int len = snprintf(linenum_buf, sizeof(linenum_buf), "%*d ", linenum_width - 1, filerow + 1);
+        abAppend(ab, "\x1b[36m", 5); // Cyan color for line numbers
+        abAppend(ab, linenum_buf, len);
+        abAppend(ab, "\x1b[m", 3); // Reset color
+      }
+      int len = E.row[filerow].rsize - E.coloff;
+      if (len < 0) len = 0;
+      if (len > E.screencols - linenum_width) len = E.screencols - linenum_width;
+      abAppend(ab, &E.row[filerow].render[E.coloff], len);
+    } else { // This block handles empty lines (~) or welcome message
+      if (E.linenumbers) { // Print spaces for line number column if line numbers are enabled
+        char spaces[16];
+        memset(spaces, ' ', linenum_width);
+        abAppend(ab, spaces, linenum_width);
+      }
       if (E.numrows == 0 && y == E.screenrows / 3) {
         char welcome[80];
         int welcomelen = snprintf(welcome, sizeof(welcome),
           "Wee editor -- version %s", WEE_VERSION);
-        if (welcomelen > E.screencols) welcomelen = E.screencols;
-        int padding = (E.screencols - welcomelen) / 2;
+        if (welcomelen > E.screencols - linenum_width) welcomelen = E.screencols - linenum_width;
+        int padding = (E.screencols - linenum_width - welcomelen) / 2;
         if (padding) {
           abAppend(ab, "~", 1);
           padding--;
@@ -483,11 +535,6 @@ void editorDrawRows(struct abuf *ab) {
       } else {
         abAppend(ab, "~", 1);
       }
-    } else {
-      int len = E.row[filerow].rsize - E.coloff;
-      if (len < 0) len = 0;
-      if (len > E.screencols) len = E.screencols;
-      abAppend(ab, &E.row[filerow].render[E.coloff], len);
     }
     abAppend(ab, "\x1b[K", 3);
     abAppend(ab, "\r\n", 2);
@@ -533,9 +580,22 @@ void editorRefreshScreen() {
   editorDrawRows(&ab);
   editorDrawStatusBar(&ab);
   editorDrawMessageBar(&ab);
+  int linenum_width = 0;
+  if (E.linenumbers) {
+    int max_linenum_digits = 1;
+    if (E.numrows > 0) {
+        int temp_num = E.numrows;
+        while (temp_num /= 10) {
+            max_linenum_digits++;
+        }
+    }
+    linenum_width = max_linenum_digits + 1;
+    if (linenum_width < 4) linenum_width = 4;
+  }
+
   char buf[32];
   snprintf(buf, sizeof(buf), "\x1b[%d;%dH", (E.cy - E.rowoff) + 1,
-                                            (E.rx - E.coloff) + 1);
+                                            (E.rx - E.coloff) + 1 + linenum_width);
   abAppend(&ab, buf, strlen(buf));
   abAppend(&ab, "\x1b[?25h", 6);
   write(STDOUT_FILENO, ab.b, ab.len);
@@ -659,6 +719,9 @@ void editorProcessKeypress() {
     case CTRL_KEY('f'):
       editorFind();
       break;
+    case CTRL_KEY('n'): // Toggle line numbers
+      E.linenumbers = !E.linenumbers;
+      break;
     case BACKSPACE:
     case CTRL_KEY('h'):
     case DEL_KEY:
@@ -709,6 +772,7 @@ void initEditor() {
   E.statusmsg[0] = '\0';
   E.statusmsg_time = 0;
   E.dirty = 0;
+  E.linenumbers = 0; // Initialize line numbers to disabled
   if (getWindowSize(&E.screenrows, &E.screencols) == -1) die("getWindowSize");
   E.screenrows -= 2;
 }
@@ -719,7 +783,7 @@ int main(int argc, char *argv[]) {
   if (argc >= 2) {
     editorOpen(argv[1]);
   }
-  editorSetStatusMessage("HELP: Ctrl-S = save | Ctrl-Y = save as | Ctrl-Q = quit | Ctrl-F = find");
+  editorSetStatusMessage("HELP: Ctrl-S = save | Ctrl-Y = save as | Ctrl-Q = quit | Ctrl-F = find | Ctrl-N = toggle line numbers");
   while (1) {
     editorRefreshScreen();
     editorProcessKeypress();
