@@ -71,6 +71,7 @@ void editorSetStatusMessage(const char *fmt, ...);
 void editorRefreshScreen();
 char *editorPrompt(char *prompt, void (*callback)(char *, int));
 void editorMoveCursor(int key);
+void editorSaveAs(); // Added for Save As functionality
 
 /*** terminal ***/
 
@@ -349,6 +350,19 @@ void editorSave() {
   }
   free(buf);
   editorSetStatusMessage("Can't save! I/O error: %s", strerror(errno));
+}
+
+void editorSaveAs() {
+  char *new_filename = editorPrompt("Save as: %s (ESC to cancel)", NULL);
+  if (new_filename == NULL) {
+    editorSetStatusMessage("Save As aborted");
+    return;
+  }
+  if (E.filename) {
+    free(E.filename);
+  }
+  E.filename = new_filename;
+  editorSave();
 }
 
 /*** find ***/
@@ -632,6 +646,9 @@ void editorProcessKeypress() {
     case CTRL_KEY('s'):
       editorSave();
       break;
+    case CTRL_KEY('y'): // Save As
+      editorSaveAs();
+      break;
     case HOME_KEY:
       E.cx = 0;
       break;
@@ -702,7 +719,7 @@ int main(int argc, char *argv[]) {
   if (argc >= 2) {
     editorOpen(argv[1]);
   }
-  editorSetStatusMessage("HELP: Ctrl-S = save | Ctrl-Q = quit | Ctrl-F = find");
+  editorSetStatusMessage("HELP: Ctrl-S = save | Ctrl-Y = save as | Ctrl-Q = quit | Ctrl-F = find");
   while (1) {
     editorRefreshScreen();
     editorProcessKeypress();
