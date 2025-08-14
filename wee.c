@@ -82,6 +82,8 @@ void editorSaveAs(); // Added for Save As functionality
 void editorCopyLine();
 void editorCutLine();
 void editorPaste();
+void editorOpenPrompt(); // New: Open file prompt
+int editorAskToSave(); // New: Ask user to save unsaved changes
 int editorRowRxToCx(erow *row, int rx); // New: Convert render index to char index
 
 /*** terminal ***/
@@ -330,10 +332,34 @@ char *editorRowsToString(int *buflen) {
 }
 
 void editorOpen(char *filename) {
-  free(E.filename);
-  E.filename = strdup(filename);
-  FILE *fp = fopen(filename, "r");
-  if (!fp) die("fopen");
+  char *new_filename_dup = strdup(filename);
+  FILE *fp = fopen(new_filename_dup, "r");
+  if (!fp) {
+    editorSetStatusMessage("Error: Could not open file %s: %s", filename, strerror(errno));
+    free(new_filename_dup);
+    return; // Do not clear screen, just return
+  }
+
+  // If we reach here, file was successfully opened. Now clear current content.
+  for (int i = 0; i < E.numrows; i++) {
+    editorFreeRow(&E.row[i]);
+  }
+  if (E.row) {
+    free(E.row);
+  }
+  E.row = NULL;
+  E.numrows = 0;
+  E.cx = 0;
+  E.cy = 0;
+  E.rowoff = 0;
+  E.coloff = 0;
+
+  // Update E.filename
+  if (E.filename) {
+      free(E.filename);
+  }
+  E.filename = new_filename_dup;
+
   char *line = NULL;
   size_t linecap = 0;
   ssize_t linelen;
@@ -346,6 +372,7 @@ void editorOpen(char *filename) {
   free(line);
   fclose(fp);
   E.dirty = 0;
+  editorSetStatusMessage("%s opened.", filename);
 }
 
 void editorSave() {
@@ -444,6 +471,51 @@ void editorPaste() {
   E.cx += E.clipboard_len; // Move cursor
 
   editorSetStatusMessage("Pasted.");
+}
+
+void editorOpenPrompt() {
+  if (!editorAskToSave()) {
+    return; // User aborted or save failed
+  }
+
+  char *filename = editorPrompt("Open file: %s (ESC to cancel)", NULL);
+  if (filename == NULL) {
+    editorSetStatusMessage("Open aborted.");
+    return;
+  }
+  editorOpen(filename);
+  free(filename); // editorOpen makes a copy
+}
+
+int editorAskToSave() {
+  if (!E.dirty) return 1; // No unsaved changes, safe to proceed
+
+  editorSetStatusMessage("WARNING! File has unsaved changes. Press Ctrl-S to save, ESC to cancel, or Ctrl-D to discard.");
+  editorRefreshScreen(); // Refresh to show the warning
+
+  while (1) { // Loop until a valid choice is made
+    int c = editorReadKey();
+    if (c == -1) { // Timeout, refresh and wait again
+      editorRefreshScreen();
+      continue;
+    }
+
+    if (c == CTRL_KEY('s')) {
+      editorSave();
+      return !E.dirty; // Return 1 if saved successfully (dirty is now 0), 0 otherwise
+    } else if (c == CTRL_KEY('d')) {
+      E.dirty = 0; // Discard changes
+      editorSetStatusMessage("Changes discarded.");
+      return 1;
+    } else if (c == '\x1b') {
+      editorSetStatusMessage("Operation aborted.");
+      return 0;
+    } else {
+      // Invalid choice, keep prompting
+      editorSetStatusMessage("WARNING! File has unsaved changes. Press Ctrl-S to save, ESC to cancel, or Ctrl-D to discard. (Invalid choice)");
+      editorRefreshScreen();
+    }
+  }
 }
 
 /*** find ***/
@@ -821,11 +893,8 @@ void editorProcessKeypress() {
       editorInsertNewline();
       break;
     case CTRL_KEY('q'):
-      if (E.dirty && quit_times > 0) {
-        editorSetStatusMessage("WARNING!!! File has unsaved changes. "
-          "Press Ctrl-Q %d more times to quit.", quit_times);
-        quit_times--;
-        return;
+      if (!editorAskToSave()) {
+        return; // User aborted or save failed
       }
       write(STDOUT_FILENO, "\x1b[2J", 4);
       write(STDOUT_FILENO, "\x1b[H", 3);
@@ -845,6 +914,9 @@ void editorProcessKeypress() {
       break;
     case CTRL_KEY('u'): // Paste
       editorPaste();
+      break;
+    case CTRL_KEY('o'): // Open file
+      editorOpenPrompt();
       break;
     case HOME_KEY:
       E.cx = 0;
@@ -925,7 +997,7 @@ int main(int argc, char *argv[]) {
   if (argc >= 2) {
     editorOpen(argv[1]);
   }
-  editorSetStatusMessage("HELP: Ctrl-S = save | Ctrl-Y = save as | Ctrl-Q = quit | Ctrl-F = find | Ctrl-N = toggle line numbers | Ctrl-W = copy | Ctrl-K = cut | Ctrl-U = paste");
+  editorSetStatusMessage("HELP: Ctrl-S = save | Ctrl-Y = save as | Ctrl-O = open | Ctrl-Q = quit | Ctrl-F = find | Ctrl-N = toggle line numbers | Ctrl-W = copy | Ctrl-K = cut | Ctrl-U = paste");
   while (1) {
     editorRefreshScreen();
     editorProcessKeypress();
