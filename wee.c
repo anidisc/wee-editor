@@ -745,14 +745,26 @@ void editorDrawRows(struct abuf *ab) {
 
 void editorDrawStatusBar(struct abuf *ab) {
   abAppend(ab, "\x1b[7m", 4);
-  char status[80], rstatus[80];
-  int len = snprintf(status, sizeof(status), "%.20s - %d lines %s",
-    E.filename ? E.filename : "[No Name]", E.numrows,
-    E.dirty ? "(modified)" : "");
-  int rlen = snprintf(rstatus, sizeof(rstatus), "%d/%d",
-    E.cy + 1, E.numrows);
-  if (len > E.screencols) len = E.screencols;
-  abAppend(ab, status, len);
+  char rstatus[80];
+  int rlen = snprintf(rstatus, sizeof(rstatus), "%d/%d", E.cy + 1, E.numrows);
+
+  const char *filename = E.filename ? E.filename : "[No Name]";
+  int filename_len = strnlen(filename, 20);
+
+  char info[80];
+  int info_len = snprintf(info, sizeof(info), " - %d lines %s", E.numrows, E.dirty ? "(modified)" : "");
+
+  int len = filename_len + info_len;
+
+  // Append filename in Bold Red
+  abAppend(ab, "\x1b[1;31m", 7);
+  abAppend(ab, filename, filename_len);
+  abAppend(ab, "\x1b[m", 3);
+  abAppend(ab, "\x1b[7m", 4);
+
+  // Append the rest of the info
+  abAppend(ab, info, info_len);
+
   while (len < E.screencols) {
     if (E.screencols - len == rlen) {
       abAppend(ab, rstatus, rlen);
