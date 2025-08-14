@@ -1,41 +1,42 @@
-# wee - Minimal Terminal Text Editor
+# wee - A Small Terminal Text Editor
 
-A lightweight, terminal-based text editor written in C, inspired by vim and micro.
+A lightweight, terminal-based text editor written in C.
 
 ## Features
-- Open and edit text files
-- Basic text manipulation (insert, delete characters, newlines)
-- Save changes to file (`Ctrl-S`)
-- Save As (`Ctrl-Y`)
-- Toggle line numbers (`Ctrl-N`)
-- Copy current line (`Ctrl-W`)
-- Cut current line (`Ctrl-K`)
-- Paste (`Ctrl-U`)
-- Enhanced Search (`Ctrl-F`):
-  - Highlights found text
-  - Navigate through results using arrow keys
-  - Places cursor at the end of the found text upon pressing Enter
-- Simple navigation (arrow keys, Home, End, PageUp, PageDown)
+
+- **File Browser**: A built-in file browser to visually navigate and open files (`Ctrl-O`).
+- **Core Editing**: Basic text manipulation (insert, delete characters, newlines).
+- **Find**: Incremental search within the file (`Ctrl-F`).
+- **Standard Navigation**: Arrow keys, Home, End, PageUp, PageDown.
+- **Save & Quit**: Save functionality (`Ctrl-S`) and a safe quit (`Ctrl-Q`) with a warning for unsaved changes.
 
 ## Building
+
+To compile the editor, use a C compiler like `gcc`:
+
 ```bash
-gcc wee.c -o wee
+gcc wee.c -o wee -Wall
 ```
 
 ## Usage
+
+To run the editor, you can either start it without a file or specify one to open:
+
 ```bash
-./wee [filename]
+# Start the editor
+./wee
+
+# Open a specific file
+./wee filename.txt
 ```
 
 ## Keybindings
-- `Ctrl-S`: Save file
-- `Ctrl-Y`: Save file as (Save As)
-- `Ctrl-Q`: Quit editor
-- `Ctrl-F`: Search for text
-- `Ctrl-N`: Toggle line numbers visibility
-- `Ctrl-W`: Copy current line
-- `Ctrl-K`: Cut current line
-- `Ctrl-U`: Paste content
-- Arrow Keys: Move cursor
-- `Home`/`End`: Move cursor to beginning/end of line
-- `PageUp`/`PageDown`: Scroll page up/down
+
+- `Ctrl-S`: Save the current file.
+- `Ctrl-Q`: Quit the editor.
+- `Ctrl-O`: Open the file browser to select a file.
+- `Ctrl-F`: Search for text within the file.
+- **Arrow Keys**: Move the cursor.
+- **Home** / **End**: Move cursor to the beginning/end of the line.
+- **PageUp** / **PageDown**: Scroll the view up or down.
+- **Backspace** / **Delete**: Delete characters.
