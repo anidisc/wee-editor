@@ -19,7 +19,7 @@
 
 /*** defines ***/
 
-#define WEE_VERSION "0.2.1"
+#define WEE_VERSION "0.3.2"
 #define WEE_TAB_STOP 8
 #define WEE_QUIT_TIMES 2
 
@@ -340,6 +340,12 @@ void editorOpen(char *filename) {
     return; // Do not clear screen, just return
   }
 
+  if (!editorAskToSave()) {
+    fclose(fp);
+    free(new_filename_dup);
+    return;
+  }
+
   // If we reach here, file was successfully opened. Now clear current content.
   for (int i = 0; i < E.numrows; i++) {
     editorFreeRow(&E.row[i]);
@@ -474,10 +480,6 @@ void editorPaste() {
 }
 
 void editorOpenPrompt() {
-  if (!editorAskToSave()) {
-    return; // User aborted or save failed
-  }
-
   char *filename = editorPrompt("Open file: %s (ESC to cancel)", NULL);
   if (filename == NULL) {
     editorSetStatusMessage("Open aborted.");

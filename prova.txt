@@ -1,5 +1,6 @@
 testo di prova
 prova
+sapendo che non si poteva
 
 testo di prova
 
@@ -7,3 +8,6 @@ testo di prova
 import
 testo di prova
 sd
+sapendo che non si potevasapendo che non si poteva
+sapendo che non si poteva
+
