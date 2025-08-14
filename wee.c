@@ -21,7 +21,7 @@
 
 /* defines */
 
-#define WEE_VERSION "0.6.0"
+#define WEE_VERSION "0.7.0"
 #define WEE_TAB_STOP 8
 #define WEE_QUIT_TIMES 2
 
@@ -83,6 +83,7 @@ void editorSave();
 char *editorFileBrowser(const char *initial_path);
 int editorAskToSave();
 void editorNewFile();
+void editorShowHelp();
 
 /* terminal */
 
@@ -792,6 +793,7 @@ void editorProcessKeypress() {
     case CTRL_KEY('u'): editorPaste(); break;
     case CTRL_KEY('n'): E.linenumbers = !E.linenumbers; break;
     case CTRL_KEY('t'): editorNewFile(); break;
+    case CTRL_KEY('g'): editorShowHelp(); break;
     case CTRL_KEY('f'): editorFind(); break;
     case BACKSPACE:
     case CTRL_KEY('h'):
@@ -800,16 +802,15 @@ void editorProcessKeypress() {
       editorDelChar();
       break;
     case PAGE_UP:
-    case PAGE_DOWN:
-      {
-        if (c == PAGE_UP) E.cy = E.rowoff;
-        else if (c == PAGE_DOWN) {
-          E.cy = E.rowoff + E.screenrows - 1;
-          if (E.cy > E.numrows) E.cy = E.numrows;
-        }
-        int times = E.screenrows;
-        while (times--) editorMoveCursor(c == PAGE_UP ? ARROW_UP : ARROW_DOWN);
-      } break;
+    case PAGE_DOWN: {
+      if (c == PAGE_UP) E.cy = E.rowoff;
+      else if (c == PAGE_DOWN) {
+        E.cy = E.rowoff + E.screenrows - 1;
+        if (E.cy > E.numrows) E.cy = E.numrows;
+      }
+      int times = E.screenrows;
+      while (times--) editorMoveCursor(c == PAGE_UP ? ARROW_UP : ARROW_DOWN);
+    } break;
     case ARROW_UP:
     case ARROW_DOWN:
     case ARROW_LEFT:
@@ -974,6 +975,56 @@ char *editorFileBrowser(const char *initial_path) {
     }
 }
 
+/* help screen */
+void editorShowHelp() {
+    const char *help_lines[] = {
+        "Wee Editor - Help",
+        "",
+        "Version: " WEE_VERSION,
+        "",
+        "--- Keybindings ---",
+        "Ctrl-S: Save file",
+        "Ctrl-Y: Save As...",
+        "Ctrl-O: Open file (File Browser)",
+        "Ctrl-T: New empty file",
+        "Ctrl-Q: Quit",
+        "",
+        "Ctrl-F: Find text",
+        "Ctrl-N: Toggle line numbers",
+        "",
+        "Ctrl-W: Copy line",
+        "Ctrl-K: Cut line",
+        "Ctrl-U: Paste line",
+        "",
+        "Ctrl-G: Show this help screen",
+        "",
+        "Press ESC, Q, or Ctrl-G to close this screen.",
+        NULL
+    };
+
+    struct abuf ab = ABUF_INIT;
+    abAppend(&ab, "\x1b[2J", 4);
+    abAppend(&ab, "\x1b[H", 3);
+
+    for (int i = 0; help_lines[i] != NULL; i++) {
+        int padding = (E.screencols - strlen(help_lines[i])) / 2;
+        if (padding < 0) padding = 0;
+        while (padding--) abAppend(&ab, " ", 1);
+        abAppend(&ab, help_lines[i], strlen(help_lines[i]));
+        abAppend(&ab, "\r\n", 2);
+    }
+
+    write(STDOUT_FILENO, ab.b, ab.len);
+    abFree(&ab);
+
+    while (1) {
+        int c = editorReadKey();
+        if (c == '\x1b' || c == 'q' || c == CTRL_KEY('g')) {
+            break;
+        }
+    }
+}
+
 
 /* init */
 
@@ -1003,7 +1054,7 @@ int main(int argc, char *argv[]) {
     editorOpen(argv[1]);
   }
   editorSetStatusMessage(
-      "HELP: C-S=save | C-Y=save as | C-T=new | C-O=open | C-Q=quit | C-F=find | C-N=lines | C-W=copy | C-K=cut | C-U=paste");
+      "HELP: C-S=save | C-Y=save as | C-T=new | C-O=open | C-Q=quit | C-F=find | C-N=lines | C-W=copy | C-K=cut | C-U=paste | C-G=help");
   while (1) {
     editorRefreshScreen();
     editorProcessKeypress();
