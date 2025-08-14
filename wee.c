@@ -62,6 +62,8 @@ struct editorConfig {
   struct termios orig_termios;
   int dirty;
   int linenumbers; // New: 0 for disabled, 1 for enabled
+  char *clipboard; // Clipboard content
+  int clipboard_len; // Clipboard content length
 };
 
 struct editorConfig E;
@@ -74,6 +76,9 @@ char *editorPrompt(char *prompt, void (*callback)(char *, int));
 void editorMoveCursor(int key);
 int editorGetTextCols(); // New: Get effective text columns
 void editorSaveAs(); // Added for Save As functionality
+void editorCopyLine();
+void editorCutLine();
+void editorPaste();
 
 /*** terminal ***/
 
@@ -365,6 +370,64 @@ void editorSaveAs() {
   }
   E.filename = new_filename;
   editorSave();
+}
+
+void editorCopyLine() {
+  if (E.cy >= E.numrows) return; // Nothing to copy if no line
+  erow *row = &E.row[E.cy];
+
+  if (E.clipboard) {
+    free(E.clipboard);
+    E.clipboard = NULL;
+    E.clipboard_len = 0;
+  }
+
+  E.clipboard_len = row->size;
+  E.clipboard = malloc(E.clipboard_len + 1);
+  if (!E.clipboard) die("malloc");
+  memcpy(E.clipboard, row->chars, E.clipboard_len);
+  E.clipboard[E.clipboard_len] = '\0';
+
+  editorSetStatusMessage("Line copied.");
+}
+
+void editorCutLine() {
+  if (E.cy >= E.numrows) return; // Nothing to cut if no line
+
+  editorCopyLine(); // Copy the line to clipboard
+
+  editorDelRow(E.cy); // Delete the current line
+
+  // Adjust cursor if we cut the last line
+  if (E.cy >= E.numrows && E.numrows > 0) {
+    E.cy = E.numrows - 1;
+    E.cx = E.row[E.cy].size;
+  } else if (E.numrows == 0) {
+    E.cy = 0;
+    E.cx = 0;
+  }
+
+  editorSetStatusMessage("Line cut.");
+}
+
+void editorPaste() {
+  if (!E.clipboard) return; // Nothing to paste
+
+  if (E.cy == E.numrows) {
+    editorInsertRow(E.numrows, "", 0); // Insert a new line if at end of file
+  }
+
+  // Insert clipboard content into the current line
+  erow *row = &E.row[E.cy];
+  // This assumes clipboard content is a single line. If it contains newlines,
+  // this would need to be more complex (e.g., splitting and inserting rows).
+  // For now, it inserts the content into the current line.
+  for (int i = 0; i < E.clipboard_len; i++) {
+    editorRowInsertChar(row, E.cx + i, E.clipboard[i]);
+  }
+  E.cx += E.clipboard_len; // Move cursor
+
+  editorSetStatusMessage("Pasted.");
 }
 
 /*** find ***/
@@ -709,6 +772,15 @@ void editorProcessKeypress() {
     case CTRL_KEY('y'): // Save As
       editorSaveAs();
       break;
+    case CTRL_KEY('w'): // Copy
+      editorCopyLine();
+      break;
+    case CTRL_KEY('k'): // Cut
+      editorCutLine();
+      break;
+    case CTRL_KEY('u'): // Paste
+      editorPaste();
+      break;
     case HOME_KEY:
       E.cx = 0;
       break;
@@ -773,6 +845,8 @@ void initEditor() {
   E.statusmsg_time = 0;
   E.dirty = 0;
   E.linenumbers = 0; // Initialize line numbers to disabled
+  E.clipboard = NULL; // Initialize clipboard
+  E.clipboard_len = 0; // Initialize clipboard length
   if (getWindowSize(&E.screenrows, &E.screencols) == -1) die("getWindowSize");
   E.screenrows -= 2;
 }
@@ -783,7 +857,7 @@ int main(int argc, char *argv[]) {
   if (argc >= 2) {
     editorOpen(argv[1]);
   }
-  editorSetStatusMessage("HELP: Ctrl-S = save | Ctrl-Y = save as | Ctrl-Q = quit | Ctrl-F = find | Ctrl-N = toggle line numbers");
+  editorSetStatusMessage("HELP: Ctrl-S = save | Ctrl-Y = save as | Ctrl-Q = quit | Ctrl-F = find | Ctrl-N = toggle line numbers | Ctrl-W = copy | Ctrl-K = cut | Ctrl-U = paste");
   while (1) {
     editorRefreshScreen();
     editorProcessKeypress();
