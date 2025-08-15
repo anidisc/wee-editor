@@ -22,7 +22,7 @@
 
 /* defines */
 
-#define WEE_VERSION "0.8.1 Beta"
+#define WEE_VERSION "0.8.2 Beta"
 #define WEE_TAB_STOP 4
 #define WEE_QUIT_TIMES 2
 
@@ -112,6 +112,8 @@ enum editorMode {
   SELECTION_MODE
 };
 
+/* append buffer */
+
 struct editorConfig E;
 
 /* prototypes */
@@ -130,6 +132,8 @@ void editorShowHelp();
 void editorUpdateSyntax(erow *row);
 void editorSelectSyntaxHighlight();
 void editorFreeSyntax();
+
+
 
 /* terminal */
 
@@ -463,12 +467,17 @@ void editorInsertNewline() {
  *        If the cursor is at the beginning of a line, it joins the current line with the previous one.
  */
 void editorDelCharSelection() {
-  if (!E.selection_active) return;
+  if (!E.selection_active) {
+    editorSetStatusMessage("editorDelCharSelection: Selection not active.");
+    return;
+  }
 
   int start_cx = E.selection_start_cx;
   int start_cy = E.selection_start_cy;
   int end_cx = E.selection_end_cx;
   int end_cy = E.selection_end_cy;
+
+  editorSetStatusMessage("editorDelCharSelection: start_cx=%d, start_cy=%d, end_cx=%d, end_cy=%d", start_cx, start_cy, end_cx, end_cy);
 
   // Ensure start is before end
   if (start_cy > end_cy || (start_cy == end_cy && start_cx > end_cx)) {
@@ -478,48 +487,54 @@ void editorDelCharSelection() {
     start_cy = end_cy;
     end_cx = temp_cx;
     end_cy = temp_cy;
+    editorSetStatusMessage("editorDelCharSelection: Swapped coords: start_cx=%d, start_cy=%d, end_cx=%d, end_cy=%d", start_cx, start_cy, end_cx, end_cy);
   }
 
-  // Case 1: Single line selection
-  if (start_cy == end_cy) {
-    erow *row = &E.row[start_cy];
-    int num_chars_to_delete = end_cx - start_cx;
-    for (int i = 0; i < num_chars_to_delete; i++) {
-      editorRowDelChar(row, start_cx); // Delete character at start_cx
-    }
-    E.cx = start_cx; // Move cursor to start of deleted selection
-    E.cy = start_cy;
+  // If selection is empty (start_cx == end_cx and start_cy == end_cy), do nothing
+  if (start_cy == end_cy && start_cx == end_cx) {
+      E.selection_active = 0;
+      editorSetStatusMessage("editorDelCharSelection: Empty selection.");
+      return;
   }
-  // Case 2: Multi-line selection
-  else {
-    // Delete characters from start_cx to end of start_cy row
-    erow *start_row = &E.row[start_cy];
-    int num_chars_to_delete_start_row = start_row->size - start_cx;
-    for (int i = 0; i < num_chars_to_delete_start_row; i++) {
-      editorRowDelChar(start_row, start_cx);
-    }
 
-    // Delete full middle rows
-    for (int i = start_cy + 1; i < end_cy; i++) {
-      editorDelRow(start_cy + 1); // Always delete the row after the start_cy row
-    }
-
-    // Delete characters from beginning of end_cy row to end_cx
-    erow *end_row = &E.row[start_cy + 1]; // After deleting middle rows, end_cy row is now start_cy + 1
-    int num_chars_to_delete_end_row = end_cx;
-    for (int i = 0; i < num_chars_to_delete_end_row; i++) {
-      editorRowDelChar(end_row, 0); // Delete character at index 0
-    }
-
-    // Join start_row and end_row
-    editorRowAppendString(start_row, end_row->chars, end_row->size);
-    editorDelRow(start_cy + 1); // Delete the now empty end_row
-
-    E.cx = start_cx; // Move cursor to start of deleted selection
-    E.cy = start_cy;
+  // Get the suffix of the end_row before any deletions
+  char *suffix_of_end_row = NULL;
+  int suffix_of_end_row_len = 0;
+  if (end_cx < E.row[end_cy].size) {
+      suffix_of_end_row_len = E.row[end_cy].size - end_cx;
+      suffix_of_end_row = malloc(suffix_of_end_row_len + 1);
+      memcpy(suffix_of_end_row, &E.row[end_cy].chars[end_cx], suffix_of_end_row_len);
+      suffix_of_end_row[suffix_of_end_row_len] = '\0';
+      editorSetStatusMessage("editorDelCharSelection: Suffix len: %d, Suffix: '%s'", suffix_of_end_row_len, suffix_of_end_row);
   }
+
+  // Delete characters from start_cx to end of line in start_cy
+  erow *start_row = &E.row[start_cy];
+  start_row->size = start_cx;
+  editorUpdateRow(start_row);
+  editorSetStatusMessage("editorDelCharSelection: Start row truncated. New size: %d", start_row->size);
+
+
+  // Delete full rows between start_cy and end_cy (exclusive of start_cy, inclusive of end_cy)
+  // Iterate from end_cy down to start_cy + 1
+  for (int i = end_cy; i > start_cy; i--) {
+      editorDelRow(i);
+      editorSetStatusMessage("editorDelCharSelection: Deleted row %d. Remaining rows: %d", i, E.numrows);
+  }
+
+  // Append the suffix of the original end_row to the modified start_row
+  if (suffix_of_end_row_len > 0) {
+      editorRowAppendString(start_row, suffix_of_end_row, suffix_of_end_row_len);
+      free(suffix_of_end_row);
+      editorSetStatusMessage("editorDelCharSelection: Suffix appended. New row size: %d", start_row->size);
+  }
+
+  E.cx = start_cx; // Move cursor to start of deleted selection
+  E.cy = start_cy;
 
   E.selection_active = 0;
+  E.dirty++; // Mark file as dirty
+  editorSetStatusMessage("editorDelCharSelection: Done.");
 }
 
 void editorDelChar() {
@@ -705,21 +720,26 @@ void editorCopySelection() {
   E.clipboard_len = 0;
 
   if (start_cy == end_cy) {
-    // Single line selection
+    // Single line selection: copy exact characters
     int len = end_cx - start_cx;
     E.clipboard = malloc(len + 1);
     memcpy(E.clipboard, &E.row[start_cy].chars[start_cx], len);
     E.clipboard[len] = '\0';
     E.clipboard_len = len;
   } else {
-    // Multi-line selection
-    // First line
-    int len = E.row[start_cy].size - start_cx;
-    E.clipboard = malloc(len + 1);
-    memcpy(E.clipboard, &E.row[start_cy].chars[start_cx], len);
-    E.clipboard_len = len;
+    // Multi-line selection: copy full lines, including newlines
+    // Copy first line from start_cx to end of line
+    int len_first_line = E.row[start_cy].size - start_cx;
+    E.clipboard = malloc(len_first_line + 1);
+    memcpy(E.clipboard, &E.row[start_cy].chars[start_cx], len_first_line);
+    E.clipboard_len = len_first_line;
 
-    // Middle lines
+    // Add newline after the first line
+    E.clipboard = realloc(E.clipboard, E.clipboard_len + 1);
+    E.clipboard[E.clipboard_len] = '\n';
+    E.clipboard_len++;
+
+    // Copy middle lines (full lines)
     for (int i = start_cy + 1; i < end_cy; i++) {
       E.clipboard = realloc(E.clipboard, E.clipboard_len + E.row[i].size + 1);
       memcpy(&E.clipboard[E.clipboard_len], E.row[i].chars, E.row[i].size);
@@ -728,13 +748,30 @@ void editorCopySelection() {
       E.clipboard_len++;
     }
 
-    // Last line
-    E.clipboard = realloc(E.clipboard, E.clipboard_len + end_cx + 1);
-    memcpy(&E.clipboard[E.clipboard_len], E.row[end_cy].chars, end_cx);
-    E.clipboard_len += end_cx;
-    E.clipboard[E.clipboard_len] = '\0';
+    // Copy last line from beginning of line to end_cx
+    int len_last_line = end_cx;
+    E.clipboard = realloc(E.clipboard, E.clipboard_len + len_last_line + 1);
+    memcpy(&E.clipboard[E.clipboard_len], E.row[end_cy].chars, len_last_line);
+    E.clipboard_len += len_last_line;
+    E.clipboard[E.clipboard_len] = '\0'; // No newline after the last line
   }
   E.selection_active = 0; // Deselect after copy
+
+  // Explicitly reset HL_SELECTION for affected rows
+  // int start_cy = E.selection_start_cy;
+  // int end_cy = E.selection_end_cy;
+
+  // Ensure start is before end for iteration
+  if (start_cy > end_cy) {
+    int temp_cy = start_cy;
+    start_cy = end_cy;
+    end_cy = temp_cy;
+  }
+
+  for (int i = start_cy; i <= end_cy; i++) {
+    editorUpdateSyntax(&E.row[i]); // Re-evaluate syntax highlighting for the row
+  }
+
   editorSetStatusMessage("Selection copied.");
 }
 
@@ -755,7 +792,65 @@ void editorCopyLine() {
  */
 void editorCutSelection() {
   if (!E.selection_active) return;
-  editorCopySelection();
+  
+  // First copy the selection WITHOUT deselecting
+  int start_cx = E.selection_start_cx;
+  int start_cy = E.selection_start_cy;
+  int end_cx = E.selection_end_cx;
+  int end_cy = E.selection_end_cy;
+
+  // Ensure start is before end
+  if (start_cy > end_cy || (start_cy == end_cy && start_cx > end_cx)) {
+    int temp_cx = start_cx;
+    int temp_cy = start_cy;
+    start_cx = end_cx;
+    start_cy = end_cy;
+    end_cx = temp_cx;
+    end_cy = temp_cy;
+  }
+
+  free(E.clipboard);
+  E.clipboard = NULL;
+  E.clipboard_len = 0;
+
+  if (start_cy == end_cy) {
+    // Single line selection: copy exact characters
+    int len = end_cx - start_cx;
+    E.clipboard = malloc(len + 1);
+    memcpy(E.clipboard, &E.row[start_cy].chars[start_cx], len);
+    E.clipboard[len] = '\0';
+    E.clipboard_len = len;
+  } else {
+    // Multi-line selection: copy full lines, including newlines
+    // Copy first line from start_cx to end of line
+    int len_first_line = E.row[start_cy].size - start_cx;
+    E.clipboard = malloc(len_first_line + 1);
+    memcpy(E.clipboard, &E.row[start_cy].chars[start_cx], len_first_line);
+    E.clipboard_len = len_first_line;
+
+    // Add newline after the first line
+    E.clipboard = realloc(E.clipboard, E.clipboard_len + 1);
+    E.clipboard[E.clipboard_len] = '\n';
+    E.clipboard_len++;
+
+    // Copy middle lines (full lines)
+    for (int i = start_cy + 1; i < end_cy; i++) {
+      E.clipboard = realloc(E.clipboard, E.clipboard_len + E.row[i].size + 1);
+      memcpy(&E.clipboard[E.clipboard_len], E.row[i].chars, E.row[i].size);
+      E.clipboard_len += E.row[i].size;
+      E.clipboard[E.clipboard_len] = '\n';
+      E.clipboard_len++;
+    }
+
+    // Copy last line from beginning of line to end_cx
+    int len_last_line = end_cx;
+    E.clipboard = realloc(E.clipboard, E.clipboard_len + len_last_line + 1);
+    memcpy(&E.clipboard[E.clipboard_len], E.row[end_cy].chars, len_last_line);
+    E.clipboard_len += len_last_line;
+    E.clipboard[E.clipboard_len] = '\0'; // No newline after the last line
+  }
+  
+  // Now delete the selection (E.selection_active is still 1)
   editorDelCharSelection();
   editorSetStatusMessage("Selection cut.");
 }
@@ -777,6 +872,12 @@ void editorCutLine() {
 /**
  * @brief Pastes the clipboard content at the cursor position.
  */
+void editorInsertRawNewline() {
+  editorInsertRow(E.cy + 1, "", 0); // Insert empty row below current
+  E.cy++; // Move cursor to new row
+  E.cx = 0; // Move cursor to beginning of new row
+}
+
 void editorPaste() {
   if (!E.clipboard) return;
 
@@ -788,7 +889,7 @@ void editorPaste() {
   // Insert clipboard content
   for (int i = 0; i < E.clipboard_len; i++) {
     if (E.clipboard[i] == '\n') {
-      editorInsertNewline();
+      editorInsertRawNewline(); // Use raw newline insertion
     } else {
       editorInsertChar(E.clipboard[i]);
     }
@@ -1526,6 +1627,7 @@ void editorProcessKeypress() {
         editorRefreshScreen(); // Add this
         break;
       case CTRL_KEY('k'): // Cut selection
+        editorSetStatusMessage("Mode: SELECTION_MODE. Cutting selection.");
         editorCutSelection();
         E.mode = NORMAL_MODE;
         editorSetStatusMessage("Selection cut.");
@@ -1565,7 +1667,15 @@ void editorProcessKeypress() {
         editorCopyLine(); // Only copy line in normal mode
         break;
       case CTRL_KEY('k'):
-        editorCutLine(); // Only cut line in normal mode
+        if (E.selection_active) { // If a selection is active, cut the selection
+          editorSetStatusMessage("Mode: NORMAL_MODE. Selection active. Cutting selection.");
+          editorCutSelection();
+          E.mode = NORMAL_MODE; // Exit selection mode after cutting
+          editorSetStatusMessage("Selection cut.");
+        } else { // Otherwise, cut the current line
+          editorSetStatusMessage("Mode: NORMAL_MODE. No selection active. Cutting line.");
+          editorCutLine();
+        }
         break;
       case CTRL_KEY('u'): editorPaste(); break;
       case CTRL_KEY('n'): E.linenumbers = !E.linenumbers; break;
@@ -1618,15 +1728,20 @@ void editorProcessKeypress() {
       case CTRL_KEY('e'):
         E.selection_end_cx = E.cx;
         E.selection_end_cy = E.cy;
-        editorSetStatusMessage("Selection end set");
+        editorSetStatusMessage("Selection end set. Entering SELECTION_MODE.");
         E.mode = SELECTION_MODE; // Enter selection mode
         break;
       default:
-        if (E.selection_active) { // If a selection is active (Ctrl+B pressed, but not Ctrl+E)
-          E.selection_active = 0; // Implicitly cancel the selection
-          editorSetStatusMessage("Selection cancelled (typed character).");
+        if (E.selection_active && !iscntrl(c) && c < 128) { // If a selection is active (Ctrl+B pressed, but not Ctrl+E) and a printable char is typed
+          editorSetStatusMessage("Selection cancelled (typed character). Deleting selection.");
+          editorDelCharSelection(); // Delete the selected text
+          editorInsertChar(c);      // Insert the new character
+          E.mode = NORMAL_MODE;     // Exit selection mode
+        } else if (E.selection_active) { // If a selection is active and a non-printable char is typed (e.g., arrow keys)
+            // Do nothing, allow cursor movement within selection mode
+        } else { // No selection active, insert character normally
+            editorInsertChar(c);
         }
-        editorInsertChar(c); // Insert the character normally
         break;
     }
   }
