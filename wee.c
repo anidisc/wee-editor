@@ -21,8 +21,8 @@
 
 /* defines */
 
-#define WEE_VERSION "0.7.0"
-#define WEE_TAB_STOP 8
+#define WEE_VERSION "0.7.3"
+#define WEE_TAB_STOP 4
 #define WEE_QUIT_TIMES 2
 
 #define CTRL_KEY(k) ((k) & 0x1f)
@@ -281,16 +281,40 @@ void editorInsertChar(int c) {
 void editorInsertNewline() {
   if (E.cx == 0) {
     editorInsertRow(E.cy, "", 0);
-  } else {
-    erow *row = &E.row[E.cy];
-    editorInsertRow(E.cy + 1, &row->chars[E.cx], row->size - E.cx);
-    row = &E.row[E.cy];
-    row->size = E.cx;
-    row->chars[row->size] = '\0';
-    editorUpdateRow(row);
+    E.cy++;
+    E.cx = 0;
+    return;
   }
+
+  erow *row = &E.row[E.cy];
+  int indent_len = 0;
+  while (indent_len < row->size && isspace(row->chars[indent_len])) {
+    indent_len++;
+  }
+  
+  char *indent_str = malloc(indent_len + 1);
+  if (indent_len > 0) memcpy(indent_str, row->chars, indent_len);
+  indent_str[indent_len] = '\0';
+
+  char* rest_of_line = &row->chars[E.cx];
+  int rest_len = row->size - E.cx;
+  char* new_line_content = malloc(indent_len + rest_len + 1);
+  memcpy(new_line_content, indent_str, indent_len);
+  memcpy(new_line_content + indent_len, rest_of_line, rest_len);
+  new_line_content[indent_len + rest_len] = '\0';
+
+  int old_cx = E.cx;
+  editorInsertRow(E.cy + 1, new_line_content, indent_len + rest_len);
+
+  row = &E.row[E.cy];
+  row->size = old_cx;
+  editorUpdateRow(row);
+
   E.cy++;
-  E.cx = 0;
+  E.cx = indent_len;
+
+  free(indent_str);
+  free(new_line_content);
 }
 
 void editorDelChar() {
@@ -348,17 +372,14 @@ int editorAskToSave() {
 }
 
 void editorOpen(char *filename) {
-  char *new_filename_dup = strdup(filename);
-  FILE *fp = fopen(new_filename_dup, "r");
-  if (!fp) {
+  FILE *fp = fopen(filename, "r");
+  if (!fp && errno != ENOENT) {
     editorSetStatusMessage("Error: Could not open file %s: %s", filename, strerror(errno));
-    free(new_filename_dup);
     return;
   }
 
   if (!editorAskToSave()) {
-      fclose(fp);
-      free(new_filename_dup);
+      if (fp) fclose(fp);
       return;
   }
 
@@ -369,21 +390,26 @@ void editorOpen(char *filename) {
   E.cx = 0; E.cy = 0; E.rowoff = 0; E.coloff = 0;
 
   free(E.filename);
-  E.filename = new_filename_dup;
+  E.filename = strdup(filename);
 
-  char *line = NULL;
-  size_t linecap = 0;
-  ssize_t linelen;
-  while ((linelen = getline(&line, &linecap, fp)) != -1) {
-    while (linelen > 0 &&
-           (line[linelen - 1] == '\n' || line[linelen - 1] == '\r'))
-      linelen--;
-    editorInsertRow(E.numrows, line, linelen);
+  if (fp) {
+    char *line = NULL;
+    size_t linecap = 0;
+    ssize_t linelen;
+    while ((linelen = getline(&line, &linecap, fp)) != -1) {
+      while (linelen > 0 &&
+             (line[linelen - 1] == '\n' || line[linelen - 1] == '\r'))
+        linelen--;
+      editorInsertRow(E.numrows, line, linelen);
+    }
+    free(line);
+    fclose(fp);
+    E.dirty = 0;
+    editorSetStatusMessage("%s opened.", filename);
+  } else {
+    E.dirty = 0;
+    editorSetStatusMessage("New file: %s", filename);
   }
-  free(line);
-  fclose(fp);
-  E.dirty = 0;
-  editorSetStatusMessage("%s opened.", filename);
 }
 
 void editorSave() {
@@ -774,6 +800,9 @@ void editorProcessKeypress() {
   int c = editorReadKey();
   switch (c) {
     case '\r': editorInsertNewline(); break;
+    case '\t':
+      for (int i = 0; i < 4; i++) editorInsertChar(' ');
+      break;
     case CTRL_KEY('q'):
       if (E.dirty && quit_times > 0) {
         editorSetStatusMessage("WARNING!!! File has unsaved changes. "

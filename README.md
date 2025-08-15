@@ -9,6 +9,11 @@ A lightweight, terminal-based text editor written in C.
 - **Find**: Incremental search within the file (`Ctrl-F`).
 - **Standard Navigation**: Arrow keys, Home, End, PageUp, PageDown.
 - **Save & Quit**: Save functionality (`Ctrl-S`) and a safe quit (`Ctrl-Q`) with a warning for unsaved changes.
+- **Save As**: Save the current file with a new name (`Ctrl-Y`).
+- **Line-based Clipboard**: Copy (`Ctrl-W`), cut (`Ctrl-K`), and paste (`Ctrl-U`) entire lines.
+- **Line Numbers**: Toggle the display of line numbers (`Ctrl-N`).
+- **New File**: Create a new, empty file buffer (`Ctrl-T`).
+- **Help Screen**: An in-editor help screen with a list of keybindings (`Ctrl-G`).
 
 ## Building
 
@@ -33,9 +38,16 @@ To run the editor, you can either start it without a file or specify one to open
 ## Keybindings
 
 - `Ctrl-S`: Save the current file.
+- `Ctrl-Y`: Save As...
 - `Ctrl-Q`: Quit the editor.
 - `Ctrl-O`: Open the file browser to select a file.
 - `Ctrl-F`: Search for text within the file.
+- `Ctrl-T`: New empty file.
+- `Ctrl-G`: Show the help screen.
+- `Ctrl-N`: Toggle line numbers.
+- `Ctrl-W`: Copy the current line.
+- `Ctrl-K`: Cut the current line.
+- `Ctrl-U`: Paste the copied/cut line.
 - **Arrow Keys**: Move the cursor.
 - **Home** / **End**: Move cursor to the beginning/end of the line.
 - **PageUp** / **PageDown**: Scroll the view up or down.
