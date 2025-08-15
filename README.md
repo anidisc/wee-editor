@@ -14,6 +14,7 @@ A lightweight, terminal-based text editor written in C.
 - **Line Numbers**: Toggle the display of line numbers (`Ctrl-N`).
 - **New File**: Create a new, empty file buffer (`Ctrl-T`).
 - **Help Screen**: An in-editor help screen with a list of keybindings (`Ctrl-G`).
+- **Auto-Indentation**: Automatically carries over the indentation from the previous line when creating a new one.
 
 ## Building
 
