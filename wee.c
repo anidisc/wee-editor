@@ -518,27 +518,47 @@ int editorAskToSave() {
  * @param filename The path of the file to open.
  */
 void editorOpen(char *filename) {
+  FILE *fp = fopen(filename, "r");
+  if (!fp && errno != ENOENT) {
+    editorSetStatusMessage("Error: Could not open file %s: %s", filename, strerror(errno));
+    return;
+  }
+
+  if (!editorAskToSave()) {
+      if (fp) fclose(fp);
+      return;
+  }
+
+  for (int i = 0; i < E.numrows; i++) editorFreeRow(&E.row[i]);
+  free(E.row);
+  E.row = NULL;
+  E.numrows = 0;
+  E.cx = 0; E.cy = 0; E.rowoff = 0; E.coloff = 0;
+
   free(E.filename);
   E.filename = strdup(filename);
 
   editorFreeSyntax();
   editorSelectSyntaxHighlight();
 
-  FILE *fp = fopen(filename, "r");
-  if (!fp) die("fopen");
-
-  char *line = NULL;
-  size_t linecap = 0;
-  ssize_t linelen;
-  while ((linelen = getline(&line, &linecap, fp)) != -1) {
-    while (linelen > 0 && (line[linelen - 1] == '\n' ||
-                           line[linelen - 1] == '\r'))
-      linelen--;
-    editorInsertRow(E.numrows, line, linelen);
+  if (fp) {
+    char *line = NULL;
+    size_t linecap = 0;
+    ssize_t linelen;
+    while ((linelen = getline(&line, &linecap, fp)) != -1) {
+      while (linelen > 0 &&
+             (line[linelen - 1] == '\n' || line[linelen - 1] == '\r'))
+        linelen--;
+      editorInsertRow(E.numrows, line, linelen);
+    }
+    free(line);
+    fclose(fp);
+    E.dirty = 0;
+    editorSetStatusMessage("%s opened.", filename);
+  } else {
+    E.dirty = 0;
+    editorSetStatusMessage("New file: %s", filename);
   }
-  free(line);
-  fclose(fp);
-  E.dirty = 0;
 }
 
 /**
