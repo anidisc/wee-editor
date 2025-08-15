@@ -1,0 +1,15 @@
+{
+  "language": "Python",
+  "filematch": [ ".py" ],
+  "keywords": [
+    "and", "as", "assert", "break", "class", "continue", "def", "del",
+    "elif", "else", "except", "finally", "for", "from", "global",
+    "if", "import", "in", "is", "lambda", "nonlocal", "not", "or",
+    "pass", "raise", "return", "try", "while", "with", "yield",
+    "True|", "False|", "None|"
+  ],
+  "singleline_comment_start": "#",
+  "multiline_comment_start": "\"\"\"",
+  "multiline_comment_end": "\"\"\"",
+  "flags": 3
+}
