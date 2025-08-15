@@ -480,18 +480,43 @@ void editorDelCharSelection() {
     end_cy = temp_cy;
   }
 
-  // Set cursor to start of selection
-  E.cx = start_cx;
-  E.cy = start_cy;
-
-  // Delete characters
-  while (start_cy < end_cy || (start_cy == end_cy && start_cx < end_cx)) {
-    editorDelChar();
-    end_cx--;
-    if (end_cx < 0) {
-      end_cy--;
-      if (end_cy >= 0) end_cx = E.row[end_cy].size;
+  // Case 1: Single line selection
+  if (start_cy == end_cy) {
+    erow *row = &E.row[start_cy];
+    int num_chars_to_delete = end_cx - start_cx;
+    for (int i = 0; i < num_chars_to_delete; i++) {
+      editorRowDelChar(row, start_cx); // Delete character at start_cx
     }
+    E.cx = start_cx; // Move cursor to start of deleted selection
+    E.cy = start_cy;
+  }
+  // Case 2: Multi-line selection
+  else {
+    // Delete characters from start_cx to end of start_cy row
+    erow *start_row = &E.row[start_cy];
+    int num_chars_to_delete_start_row = start_row->size - start_cx;
+    for (int i = 0; i < num_chars_to_delete_start_row; i++) {
+      editorRowDelChar(start_row, start_cx);
+    }
+
+    // Delete full middle rows
+    for (int i = start_cy + 1; i < end_cy; i++) {
+      editorDelRow(start_cy + 1); // Always delete the row after the start_cy row
+    }
+
+    // Delete characters from beginning of end_cy row to end_cx
+    erow *end_row = &E.row[start_cy + 1]; // After deleting middle rows, end_cy row is now start_cy + 1
+    int num_chars_to_delete_end_row = end_cx;
+    for (int i = 0; i < num_chars_to_delete_end_row; i++) {
+      editorRowDelChar(end_row, 0); // Delete character at index 0
+    }
+
+    // Join start_row and end_row
+    editorRowAppendString(start_row, end_row->chars, end_row->size);
+    editorDelRow(start_cy + 1); // Delete the now empty end_row
+
+    E.cx = start_cx; // Move cursor to start of deleted selection
+    E.cy = start_cy;
   }
 
   E.selection_active = 0;
@@ -1486,24 +1511,34 @@ void editorProcessKeypress() {
         E.selection_active = 0;
         E.mode = NORMAL_MODE;
         editorSetStatusMessage("Selection cancelled.");
+        editorRefreshScreen(); // Add this
         break;
       case DEL_KEY: // Delete selection
         editorDelCharSelection();
         E.mode = NORMAL_MODE;
         editorSetStatusMessage("Selection deleted.");
+        editorRefreshScreen(); // Add this
         break;
       case CTRL_KEY('w'): // Copy selection
         editorCopySelection(); // This already sets E.selection_active = 0
         E.mode = NORMAL_MODE;
-        editorSetStatusMessage("Selection copied."); // Redundant, editorCopySelection sets it
+        // editorSetStatusMessage("Selection copied."); // Redundant, editorCopySelection sets it
+        editorRefreshScreen(); // Add this
         break;
       case CTRL_KEY('k'): // Cut selection
         editorCutSelection();
         E.mode = NORMAL_MODE;
         editorSetStatusMessage("Selection cut.");
+        editorRefreshScreen(); // Add this
         break;
       default:
-        // Ignore other key presses in selection mode
+        if (!iscntrl(c) && c < 128) { // Check if it's a printable ASCII character
+          editorDelCharSelection(); // Delete the selected text (sets E.selection_active = 0)
+          editorInsertChar(c);      // Insert the new character
+          E.mode = NORMAL_MODE;     // Exit selection mode
+          editorSetStatusMessage(""); // Clear status message
+          editorRefreshScreen();    // Refresh screen
+        }
         break;
     }
   } else { // NORMAL_MODE
@@ -1587,7 +1622,11 @@ void editorProcessKeypress() {
         E.mode = SELECTION_MODE; // Enter selection mode
         break;
       default:
-        editorInsertChar(c);
+        if (E.selection_active) { // If a selection is active (Ctrl+B pressed, but not Ctrl+E)
+          E.selection_active = 0; // Implicitly cancel the selection
+          editorSetStatusMessage("Selection cancelled (typed character).");
+        }
+        editorInsertChar(c); // Insert the character normally
         break;
     }
   }
