@@ -4,6 +4,9 @@ A lightweight, terminal-based text editor written in C.
 
 ## Features
 
+- **Text Selection**: Select a block of text by marking a start point (`Ctrl-B`) and an end point (`Ctrl-E`). The selected text will be highlighted.
+- **Operations on Selection**: Perform copy (`Ctrl-W`), cut (`Ctrl-K`), paste (`Ctrl-U`), or delete (`Delete`/`Backspace`) operations on the selected text.
+- **Deselection**: Clear the current selection by pressing `Esc` or `Ctrl-L`.
 - **Syntax Highlighting**: Extensible syntax highlighting for different programming languages (C and Python included by default).
 - **File Browser**: A built-in file browser to visually navigate and open files (`Ctrl-O`).
 - **Core Editing**: Basic text manipulation (insert, delete characters, newlines).
@@ -53,10 +56,13 @@ Syntax highlighting rules are defined in `.json` files located in the `syntax/` 
 - `Ctrl-T`: New empty file.
 - `Ctrl-G`: Show the help screen.
 - `Ctrl-N`: Toggle line numbers.
-- `Ctrl-W`: Copy the current line.
-- `Ctrl-K`: Cut the current line.
-- `Ctrl-U`: Paste the copied/cut line.
+- `Ctrl-W`: Copy the current line or selected text.
+- `Ctrl-K`: Cut the current line or selected text.
+- `Ctrl-U`: Paste the copied/cut line or selected text.
+- `Ctrl-B`: Mark the start of a text selection.
+- `Ctrl-E`: Mark the end of a text selection.
+- `Esc` / `Ctrl-L`: Clear the current text selection.
 - **Arrow Keys**: Move the cursor.
 - **Home** / **End**: Move cursor to the beginning/end of the line.
 - **PageUp** / **PageDown**: Scroll the view up or down.
-- **Backspace** / **Delete**: Delete characters.
+- **Backspace** / **Delete**: Delete characters or selected text.

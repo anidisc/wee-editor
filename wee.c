@@ -22,7 +22,7 @@
 
 /* defines */
 
-#define WEE_VERSION "0.8.0"
+#define WEE_VERSION "0.8.1 Beta"
 #define WEE_TAB_STOP 4
 #define WEE_QUIT_TIMES 2
 
@@ -49,7 +49,8 @@ enum editorHighlight {
   HL_KEYWORD2,
   HL_STRING,
   HL_NUMBER,
-  HL_MATCH
+  HL_MATCH,
+  HL_SELECTION
 };
 
 #define HL_HIGHLIGHT_NUMBERS (1<<0)
@@ -98,6 +99,17 @@ struct editorConfig {
   int hl_start;
   int hl_end;
   struct editorSyntax *syntax;
+  int selection_start_cx;
+  int selection_start_cy;
+  int selection_end_cx;
+  int selection_end_cy;
+  int selection_active;
+  int mode;
+};
+
+enum editorMode {
+  NORMAL_MODE,
+  SELECTION_MODE
 };
 
 struct editorConfig E;
@@ -112,6 +124,8 @@ void editorSave();
 char *editorFileBrowser(const char *initial_path);
 int editorAskToSave();
 void editorNewFile();
+void editorDelChar();
+void editorDelCharSelection();
 void editorShowHelp();
 void editorUpdateSyntax(erow *row);
 void editorSelectSyntaxHighlight();
@@ -218,7 +232,8 @@ int getWindowSize(int *rows, int *cols) {
   struct winsize ws;
   if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == -1 || ws.ws_col == 0) {
     return -1;
-  } else {
+  }
+  else {
     *cols = ws.ws_col;
     *rows = ws.ws_row;
     return 0;
@@ -447,6 +462,41 @@ void editorInsertNewline() {
  * @brief Deletes the character before the cursor (like the Backspace key).
  *        If the cursor is at the beginning of a line, it joins the current line with the previous one.
  */
+void editorDelCharSelection() {
+  if (!E.selection_active) return;
+
+  int start_cx = E.selection_start_cx;
+  int start_cy = E.selection_start_cy;
+  int end_cx = E.selection_end_cx;
+  int end_cy = E.selection_end_cy;
+
+  // Ensure start is before end
+  if (start_cy > end_cy || (start_cy == end_cy && start_cx > end_cx)) {
+    int temp_cx = start_cx;
+    int temp_cy = start_cy;
+    start_cx = end_cx;
+    start_cy = end_cy;
+    end_cx = temp_cx;
+    end_cy = temp_cy;
+  }
+
+  // Set cursor to start of selection
+  E.cx = start_cx;
+  E.cy = start_cy;
+
+  // Delete characters
+  while (start_cy < end_cy || (start_cy == end_cy && start_cx < end_cx)) {
+    editorDelChar();
+    end_cx--;
+    if (end_cx < 0) {
+      end_cy--;
+      if (end_cy >= 0) end_cx = E.row[end_cy].size;
+    }
+  }
+
+  E.selection_active = 0;
+}
+
 void editorDelChar() {
   if (E.cy == E.numrows) return;
   if (E.cx == 0 && E.cy == 0) return;
@@ -607,7 +657,64 @@ void editorSaveAs() {
 /**
  * @brief Copies the current line to the internal clipboard.
  */
+void editorCopySelection() {
+  if (!E.selection_active) return;
+
+  int start_cx = E.selection_start_cx;
+  int start_cy = E.selection_start_cy;
+  int end_cx = E.selection_end_cx;
+  int end_cy = E.selection_end_cy;
+
+  // Ensure start is before end
+  if (start_cy > end_cy || (start_cy == end_cy && start_cx > end_cx)) {
+    int temp_cx = start_cx;
+    int temp_cy = start_cy;
+    start_cx = end_cx;
+    start_cy = end_cy;
+    end_cx = temp_cx;
+    end_cy = temp_cy;
+  }
+
+  free(E.clipboard);
+  E.clipboard = NULL;
+  E.clipboard_len = 0;
+
+  if (start_cy == end_cy) {
+    // Single line selection
+    int len = end_cx - start_cx;
+    E.clipboard = malloc(len + 1);
+    memcpy(E.clipboard, &E.row[start_cy].chars[start_cx], len);
+    E.clipboard[len] = '\0';
+    E.clipboard_len = len;
+  } else {
+    // Multi-line selection
+    // First line
+    int len = E.row[start_cy].size - start_cx;
+    E.clipboard = malloc(len + 1);
+    memcpy(E.clipboard, &E.row[start_cy].chars[start_cx], len);
+    E.clipboard_len = len;
+
+    // Middle lines
+    for (int i = start_cy + 1; i < end_cy; i++) {
+      E.clipboard = realloc(E.clipboard, E.clipboard_len + E.row[i].size + 1);
+      memcpy(&E.clipboard[E.clipboard_len], E.row[i].chars, E.row[i].size);
+      E.clipboard_len += E.row[i].size;
+      E.clipboard[E.clipboard_len] = '\n';
+      E.clipboard_len++;
+    }
+
+    // Last line
+    E.clipboard = realloc(E.clipboard, E.clipboard_len + end_cx + 1);
+    memcpy(&E.clipboard[E.clipboard_len], E.row[end_cy].chars, end_cx);
+    E.clipboard_len += end_cx;
+    E.clipboard[E.clipboard_len] = '\0';
+  }
+  E.selection_active = 0; // Deselect after copy
+  editorSetStatusMessage("Selection copied.");
+}
+
 void editorCopyLine() {
+
   if (E.cy >= E.numrows) return;
   erow *row = &E.row[E.cy];
   free(E.clipboard);
@@ -621,6 +728,13 @@ void editorCopyLine() {
 /**
  * @brief Cuts the current line (copies and deletes).
  */
+void editorCutSelection() {
+  if (!E.selection_active) return;
+  editorCopySelection();
+  editorDelCharSelection();
+  editorSetStatusMessage("Selection cut.");
+}
+
 void editorCutLine() {
   if (E.cy >= E.numrows) return;
   editorCopyLine();
@@ -640,14 +754,20 @@ void editorCutLine() {
  */
 void editorPaste() {
   if (!E.clipboard) return;
-  if (E.cy == E.numrows) {
-    editorInsertRow(E.numrows, "", 0);
+
+  // If there's an active selection, delete it first
+  if (E.selection_active) {
+    editorDelCharSelection();
   }
-  erow *row = &E.row[E.cy];
+
+  // Insert clipboard content
   for (int i = 0; i < E.clipboard_len; i++) {
-    editorRowInsertChar(row, E.cx + i, E.clipboard[i]);
+    if (E.clipboard[i] == '\n') {
+      editorInsertNewline();
+    } else {
+      editorInsertChar(E.clipboard[i]);
+    }
   }
-  E.cx += E.clipboard_len;
   editorSetStatusMessage("Pasted.");
 }
 
@@ -687,6 +807,7 @@ int editorSyntaxToColor(int hl) {
     case HL_STRING: return 35;
     case HL_NUMBER: return 31;
     case HL_MATCH: return 34;
+    case HL_SELECTION: return 7; /* Inverse video */
     default: return 37;
   }
 }
@@ -929,9 +1050,11 @@ void editorFindCallback(char *query, int key) {
     return;
   } else if (key == ARROW_RIGHT || key == ARROW_DOWN) {
     direction = 1;
-  } else if (key == ARROW_LEFT || key == ARROW_UP) {
+  }
+  else if (key == ARROW_LEFT || key == ARROW_UP) {
     direction = -1;
-  } else {
+  }
+  else {
     last_match = -1;
     direction = 1;
   }
@@ -970,7 +1093,8 @@ void editorFind() {
   char *query = editorPrompt("Search: %s (Use ESC/Arrows/Enter)", editorFindCallback);
   if (query) {
     free(query);
-  } else {
+  }
+  else {
     E.cx = saved_cx; E.cy = saved_cy;
     E.coloff = saved_coloff; E.rowoff = saved_rowoff;
   }
@@ -1090,35 +1214,109 @@ void editorDrawRows(struct abuf *ab) {
       char *c = &E.row[filerow].render[E.coloff];
       unsigned char *hl = &E.row[filerow].hl[E.coloff];
       int current_color = -1;
+
+      // Local variables for selection coordinates
+      int local_sel_start_cx = E.selection_start_cx;
+      int local_sel_start_cy = E.selection_start_cy;
+      int local_sel_end_cx = E.selection_end_cx;
+      int local_sel_end_cy = E.selection_end_cy;
+
+      if (E.selection_active) {
+          // Ensure start is before end for drawing purposes
+          // Ensure start is before end for drawing purposes (already done in editorDelCharSelection and editorCopySelection, but good to be safe)
+          if (local_sel_start_cy > local_sel_end_cy || (local_sel_start_cy == local_sel_end_cy && local_sel_start_cx > local_sel_end_cx)) {
+              int temp_cy = local_sel_start_cy;
+              int temp_cx = local_sel_start_cx;
+              local_sel_start_cy = local_sel_end_cy;
+              local_sel_start_cx = local_sel_end_cx;
+              local_sel_end_cy = temp_cy;
+              local_sel_end_cx = temp_cx;
+          }
+
+          int sel_start_rx = 0;
+          int sel_end_rx = 0;
+
+          if (filerow < local_sel_start_cy || filerow > local_sel_end_cy) {
+              // Current row is outside the selection range, no highlighting
+              sel_start_rx = -1; // Indicate no selection for this row
+              sel_end_rx = -1;
+          } else {
+              // Current row is within the selection range
+              if (filerow == local_sel_start_cy) {
+                  sel_start_rx = editorRowCxToRx(&E.row[filerow], local_sel_start_cx);
+              } else {
+                  sel_start_rx = 0; // Start from the beginning of the row
+              }
+
+              if (filerow == local_sel_end_cy) {
+                  sel_end_rx = editorRowCxToRx(&E.row[filerow], local_sel_end_cx);
+              } else {
+                  sel_end_rx = E.row[filerow].rsize; // Go to the end of the row
+              }
+          }
+
+          for (int j = 0; j < len; j++) {
+            int current_render_idx = E.coloff + j; // This is the render index of the character being drawn
+            // Apply selection highlighting
+            if (sel_start_rx != -1) { // Only highlight if this row is part of the selection
+                // Special case for single character selection
+                if (local_sel_start_cy == local_sel_end_cy && local_sel_start_cx == local_sel_end_cx) {
+                    if (current_render_idx == sel_start_rx) {
+                        hl[j] = HL_SELECTION;
+                    }
+                } else {
+                    if (current_render_idx >= sel_start_rx && current_render_idx < sel_end_rx) {
+                        hl[j] = HL_SELECTION;
+                    }
+                }
+            }
+          }
+      }
+
       for (int j = 0; j < len; j++) {
-        if (iscntrl(c[j])) {
-          char sym = (c[j] <= 26) ? '@' + c[j] : '?';
-          abAppend(ab, "\x1b[7m", 4);
-          abAppend(ab, &sym, 1);
-          abAppend(ab, "\x1b[m", 3);
-          if (current_color != -1) {
-            char buf[16];
-            int clen = snprintf(buf, sizeof(buf), "\x1b[%dm", current_color);
-            abAppend(ab, buf, clen);
-          }
-        } else if (hl[j] == HL_NORMAL) {
-          if (current_color != -1) {
-            abAppend(ab, "\x1b[39m", 5);
-            current_color = -1;
-          }
-          abAppend(ab, &c[j], 1);
+        if (filerow == E.hl_row) {
+            int start = E.hl_start > E.coloff ? E.hl_start - E.coloff : 0;
+            int end = E.hl_end > E.coloff ? E.hl_end - E.coloff : 0;
+            if (end > len) end = len;
+            if (j >= start && j < end) {
+                hl[j] = HL_MATCH;
+            }
+        }
+
+        int color = editorSyntaxToColor(hl[j]);
+        // Only consider HL_SELECTION if selection is active
+        int is_selection = (E.selection_active && hl[j] == HL_SELECTION);
+
+        if (is_selection) {
+            if (current_color != 7) { // If not already in inverse video
+                abAppend(ab, "\x1b[7m", 4); // Set inverse video
+                current_color = 7;
+            }
         } else {
-          int color = editorSyntaxToColor(hl[j]);
-          if (color != current_color) {
-            current_color = color;
-            char buf[16];
-            int clen = snprintf(buf, sizeof(buf), "\x1b[%dm", color);
-            abAppend(ab, buf, clen);
-          }
+            if (current_color == 7) { // If was in inverse video, reset it
+                abAppend(ab, "\x1b[27m", 5); // Reset inverse video
+                current_color = -1; // Reset current_color to force re-evaluation of normal color
+            }
+            if (color != current_color) {
+                current_color = color;
+                char buf[16];
+                int clen = snprintf(buf, sizeof(buf), "\x1b[%dm", color);
+                abAppend(ab, buf, clen);
+            }
+        }
+
+        if (iscntrl(c[j])) { // Control characters
+          char sym = (c[j] <= 26) ? '@' + c[j] : '?';
+          abAppend(ab, &sym, 1);
+        } else { // Normal characters
           abAppend(ab, &c[j], 1);
         }
       }
-      abAppend(ab, "\x1b[39m", 5);
+      // Ensure inverse video is reset at the end of the line
+      if (current_color == 7) {
+          abAppend(ab, "\x1b[27m", 5);
+      }
+      abAppend(ab, "\x1b[39m", 5); // Reset foreground color
     }
     abAppend(ab, "\x1b[K", 3);
     abAppend(ab, "\r\n", 2);
@@ -1281,69 +1479,117 @@ void editorMoveCursor(int key) {
 void editorProcessKeypress() {
   static int quit_times = WEE_QUIT_TIMES;
   int c = editorReadKey();
-  switch (c) {
-    case '\r': editorInsertNewline(); break;
-    case '\t':
-      for (int i = 0; i < 4; i++) editorInsertChar(' ');
-      break;
-    case CTRL_KEY('q'):
-      if (E.dirty && quit_times > 0) {
-        editorSetStatusMessage("WARNING!!! File has unsaved changes. "
-                               "Press Ctrl-Q %d more times to quit.",
-                               quit_times);
-        quit_times--;
-        return;
-      }
-      write(STDOUT_FILENO, "\x1b[2J", 4);
-      write(STDOUT_FILENO, "\x1b[H", 3);
-      exit(0);
-      break;
-    case CTRL_KEY('s'): editorSave(); break;
-    case CTRL_KEY('y'): editorSaveAs(); break;
-    case CTRL_KEY('w'): editorCopyLine(); break;
-    case CTRL_KEY('k'): editorCutLine(); break;
-    case CTRL_KEY('u'): editorPaste(); break;
-    case CTRL_KEY('n'): E.linenumbers = !E.linenumbers; break;
-    case CTRL_KEY('t'): editorNewFile(); break;
-    case CTRL_KEY('g'): editorShowHelp(); break;
-    case CTRL_KEY('f'): editorFind(); break;
-    case BACKSPACE:
-    case CTRL_KEY('h'):
-    case DEL_KEY:
-      if (c == DEL_KEY) editorMoveCursor(ARROW_RIGHT);
-      editorDelChar();
-      break;
-    case PAGE_UP:
-    case PAGE_DOWN:
-      {
-        if (c == PAGE_UP) E.cy = E.rowoff;
-        else if (c == PAGE_DOWN) {
-          E.cy = E.rowoff + E.screenrows - 1;
-          if (E.cy > E.numrows) E.cy = E.numrows;
-        }
-        int times = E.screenrows;
-        while (times--) editorMoveCursor(c == PAGE_UP ? ARROW_UP : ARROW_DOWN);
-      } break;
-    case ARROW_UP:
-    case ARROW_DOWN:
-    case ARROW_LEFT:
-    case ARROW_RIGHT:
-      editorMoveCursor(c);
-      break;
-    case CTRL_KEY('o'): {
-      char *path = editorFileBrowser(".");
-      if (path) {
-        editorOpen(path);
-        free(path);
-      }
-      break;
+
+  if (E.mode == SELECTION_MODE) {
+    switch (c) {
+      case '\x1b': // ESC - Cancel selection
+        E.selection_active = 0;
+        E.mode = NORMAL_MODE;
+        editorSetStatusMessage("Selection cancelled.");
+        break;
+      case DEL_KEY: // Delete selection
+        editorDelCharSelection();
+        E.mode = NORMAL_MODE;
+        editorSetStatusMessage("Selection deleted.");
+        break;
+      case CTRL_KEY('w'): // Copy selection
+        editorCopySelection(); // This already sets E.selection_active = 0
+        E.mode = NORMAL_MODE;
+        editorSetStatusMessage("Selection copied."); // Redundant, editorCopySelection sets it
+        break;
+      case CTRL_KEY('k'): // Cut selection
+        editorCutSelection();
+        E.mode = NORMAL_MODE;
+        editorSetStatusMessage("Selection cut.");
+        break;
+      default:
+        // Ignore other key presses in selection mode
+        break;
     }
-    case CTRL_KEY('l'):
-    case '\x1b':
-      break;
-    default:
-      editorInsertChar(c);
-      break;
+  } else { // NORMAL_MODE
+    switch (c) {
+      case '\r': editorInsertNewline(); break;
+      case '\t':
+        for (int i = 0; i < 4; i++) editorInsertChar(' ');
+        break;
+      case CTRL_KEY('q'):
+        if (E.dirty && quit_times > 0) {
+          editorSetStatusMessage("WARNING!!! File has unsaved changes. "
+                                 "Press Ctrl-Q %d more times to quit.",
+                                 quit_times);
+          quit_times--;
+          return;
+        }
+        write(STDOUT_FILENO, "\x1b[2J", 4);
+        write(STDOUT_FILENO, "\x1b[H", 3);
+        exit(0);
+        break;
+      case CTRL_KEY('s'): editorSave(); break;
+      case CTRL_KEY('y'): editorSaveAs(); break;
+      case CTRL_KEY('w'):
+        editorCopyLine(); // Only copy line in normal mode
+        break;
+      case CTRL_KEY('k'):
+        editorCutLine(); // Only cut line in normal mode
+        break;
+      case CTRL_KEY('u'): editorPaste(); break;
+      case CTRL_KEY('n'): E.linenumbers = !E.linenumbers; break;
+      case CTRL_KEY('t'): editorNewFile(); break;
+      case CTRL_KEY('g'): editorShowHelp(); break;
+      case CTRL_KEY('f'): editorFind(); break;
+      case BACKSPACE:
+      case CTRL_KEY('h'):
+      case DEL_KEY:
+        if (c == DEL_KEY) editorMoveCursor(ARROW_RIGHT);
+        editorDelChar();
+        break;
+      case PAGE_UP:
+      case PAGE_DOWN:
+        {
+          if (c == PAGE_UP) E.cy = E.rowoff;
+          else if (c == PAGE_DOWN) {
+            E.cy = E.rowoff + E.screenrows - 1;
+            if (E.cy > E.numrows) E.cy = E.numrows;
+          }
+          int times = E.screenrows;
+          while (times--) editorMoveCursor(c == PAGE_UP ? ARROW_UP : ARROW_DOWN);
+        } break;
+      case ARROW_UP:
+      case ARROW_DOWN:
+      case ARROW_LEFT:
+      case ARROW_RIGHT:
+        editorMoveCursor(c);
+        break;
+      case CTRL_KEY('o'): {
+        char *path = editorFileBrowser(".");
+        if (path) {
+          editorOpen(path);
+          free(path);
+        }
+        break;
+      }
+      case CTRL_KEY('l'):
+      case '\x1b':
+        // This is now handled in SELECTION_MODE
+        break;
+      case CTRL_KEY('b'):
+        E.selection_start_cx = E.cx;
+        E.selection_start_cy = E.cy;
+        E.selection_end_cx = E.cx; // Initialize end to start
+        E.selection_end_cy = E.cy; // Initialize end to start
+        E.selection_active = 1;
+        editorSetStatusMessage("Selection start set");
+        break;
+      case CTRL_KEY('e'):
+        E.selection_end_cx = E.cx;
+        E.selection_end_cy = E.cy;
+        editorSetStatusMessage("Selection end set");
+        E.mode = SELECTION_MODE; // Enter selection mode
+        break;
+      default:
+        editorInsertChar(c);
+        break;
+    }
   }
   quit_times = WEE_QUIT_TIMES;
 }
@@ -1390,7 +1636,6 @@ char *editorFileBrowser(const char *initial_path) {
         DIR *d = opendir(path);
         if (!d) {
             editorSetStatusMessage("Cannot open directory: %s", strerror(errno));
-            free(path);
             return NULL;
         }
 
@@ -1574,6 +1819,12 @@ void initEditor() {
   E.hl_start = -1;
   E.hl_end = -1;
   E.syntax = NULL;
+  E.selection_start_cx = -1;
+  E.selection_start_cy = -1;
+  E.selection_end_cx = -1;
+  E.selection_end_cy = -1;
+  E.selection_active = 0;
+  E.mode = NORMAL_MODE; // Initialize to normal mode
 
   if (getWindowSize(&E.screenrows, &E.screencols) == -1) die("getWindowSize");
   E.screenrows -= 2;
