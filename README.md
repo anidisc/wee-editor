@@ -4,6 +4,7 @@ A lightweight, terminal-based text editor written in C.
 
 ## Features
 
+- **Syntax Highlighting**: Extensible syntax highlighting for different programming languages (C and Python included by default).
 - **File Browser**: A built-in file browser to visually navigate and open files (`Ctrl-O`).
 - **Core Editing**: Basic text manipulation (insert, delete characters, newlines).
 - **Find**: Incremental search within the file (`Ctrl-F`).
@@ -18,10 +19,12 @@ A lightweight, terminal-based text editor written in C.
 
 ## Building
 
-To compile the editor, use a C compiler like `gcc`:
+The project uses a `Makefile` for compilation. The only dependency is `cJSON`, which is included in the repository.
+
+To compile the editor, simply run `make`:
 
 ```bash
-gcc wee.c -o wee -Wall
+make
 ```
 
 ## Usage
@@ -35,6 +38,10 @@ To run the editor, you can either start it without a file or specify one to open
 # Open a specific file
 ./wee filename.txt
 ```
+
+## Syntax Highlighting
+
+Syntax highlighting rules are defined in `.json` files located in the `syntax/` directory. You can add support for new languages by creating a new JSON file in this directory. See `syntax/c.json` and `syntax/python.json` for examples.
 
 ## Keybindings
 

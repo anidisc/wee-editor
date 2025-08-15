@@ -22,7 +22,7 @@
 
 /* defines */
 
-#define WEE_VERSION "0.7.3"
+#define WEE_VERSION "0.8.0"
 #define WEE_TAB_STOP 4
 #define WEE_QUIT_TIMES 2
 
