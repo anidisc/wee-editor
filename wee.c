@@ -132,6 +132,7 @@ void editorShowHelp();
 void editorUpdateSyntax(erow *row);
 void editorSelectSyntaxHighlight();
 void editorFreeSyntax();
+void editorUpdateSelectionSyntax();
 
 
 
@@ -1072,6 +1073,33 @@ void editorFreeSyntax() {
     E.syntax = NULL;
 }
 
+/**
+ * @brief Updates syntax highlighting for rows that were part of a selection
+ *        to remove HL_SELECTION highlighting.
+ */
+void editorUpdateSelectionSyntax() {
+  if (E.numrows == 0) return;
+  
+  int start_cy = E.selection_start_cy;
+  int end_cy = E.selection_end_cy;
+  
+  // Ensure start is before end for iteration
+  if (start_cy > end_cy) {
+    int temp_cy = start_cy;
+    start_cy = end_cy;
+    end_cy = temp_cy;
+  }
+  
+  // Clamp to valid range
+  if (start_cy < 0) start_cy = 0;
+  if (end_cy >= E.numrows) end_cy = E.numrows - 1;
+  
+  // Update syntax highlighting for all affected rows
+  for (int i = start_cy; i <= end_cy; i++) {
+    editorUpdateSyntax(&E.row[i]);
+  }
+}
+
 void editorSelectSyntaxHighlight() {
   E.syntax = NULL;
   if (E.filename == NULL) return;
@@ -1609,10 +1637,10 @@ void editorProcessKeypress() {
   if (E.mode == SELECTION_MODE) {
     switch (c) {
       case '\x1b': // ESC - Cancel selection
+        editorUpdateSelectionSyntax(); // Update syntax highlighting to remove selection
         E.selection_active = 0;
         E.mode = NORMAL_MODE;
         editorSetStatusMessage("Selection cancelled.");
-        editorRefreshScreen(); // Add this
         break;
       case DEL_KEY: // Delete selection
         editorDelCharSelection();
@@ -1730,6 +1758,19 @@ void editorProcessKeypress() {
         E.selection_end_cy = E.cy;
         editorSetStatusMessage("Selection end set. Entering SELECTION_MODE.");
         E.mode = SELECTION_MODE; // Enter selection mode
+        break;
+      case CTRL_KEY('a'): // Select all text
+        if (E.numrows > 0) {
+          E.selection_start_cx = 0;
+          E.selection_start_cy = 0;
+          E.selection_end_cx = E.row[E.numrows - 1].size;
+          E.selection_end_cy = E.numrows - 1;
+          E.selection_active = 1;
+          E.mode = SELECTION_MODE;
+          editorSetStatusMessage("All text selected.");
+        } else {
+          editorSetStatusMessage("No text to select.");
+        }
         break;
       default:
         if (E.selection_active && !iscntrl(c) && c < 128) { // If a selection is active (Ctrl+B pressed, but not Ctrl+E) and a printable char is typed
@@ -1919,6 +1960,7 @@ void editorShowHelp() {
         "Ctrl-F: Find text",
         "Ctrl-N: Toggle line numbers",
         "",
+        "Ctrl-A: Select all text",
         "Ctrl-W: Copy line",
         "Ctrl-K: Cut line",
         "Ctrl-U: Paste line",
@@ -1997,7 +2039,7 @@ int main(int argc, char *argv[]) {
     editorOpen(argv[1]);
   }
   editorSetStatusMessage(
-      "HELP: C-S=save | C-Y=save as | C-T=new | C-O=open | C-Q=quit | C-F=find | C-N=lines | C-W=copy | C-K=cut | C-U=paste | C-G=help");
+      "HELP: C-S=save | C-Y=save as | C-T=new | C-O=open | C-Q=quit | C-F=find | C-N=lines | C-A=select all | C-W=copy | C-K=cut | C-U=paste | C-G=help");
   while (1) {
     editorRefreshScreen();
     editorProcessKeypress();
