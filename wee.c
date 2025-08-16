@@ -22,7 +22,7 @@
 
 /* defines */
 
-#define WEE_VERSION "0.8.2 Beta"
+#define WEE_VERSION "0.81 Beta"
 #define WEE_TAB_STOP 4
 #define WEE_QUIT_TIMES 2
 
@@ -1197,18 +1197,21 @@ void editorFindCallback(char *query, int key) {
   static int last_match = -1;
   static int direction = 1;
 
+  // If a previous match was selected, redraw its syntax to remove the highlight
+  if (last_match != -1) {
+    editorUpdateSyntax(&E.row[last_match]);
+  }
+
   if (key == '\r' || key == '\x1b') {
     last_match = -1;
     direction = 1;
-    E.hl_row = -1;
+    E.selection_active = 0;
     return;
   } else if (key == ARROW_RIGHT || key == ARROW_DOWN) {
     direction = 1;
-  }
-  else if (key == ARROW_LEFT || key == ARROW_UP) {
+  } else if (key == ARROW_LEFT || key == ARROW_UP) {
     direction = -1;
-  }
-  else {
+  } else {
     last_match = -1;
     direction = 1;
   }
@@ -1217,6 +1220,7 @@ void editorFindCallback(char *query, int key) {
   int current = last_match;
   if (current == -1) current = E.cy;
 
+  int found = 0;
   for (int i = 0; i < E.numrows; i++) {
     current += direction;
     if (current == -1) current = E.numrows - 1;
@@ -1229,30 +1233,40 @@ void editorFindCallback(char *query, int key) {
       E.cy = current;
       E.cx = editorRowRxToCx(row, match - row->render);
       E.rowoff = E.numrows;
-      E.hl_row = current;
-      E.hl_start = match - row->render;
-      E.hl_end = E.hl_start + strlen(query);
+
+      // Activate selection for the found match
+      E.selection_active = 1;
+      E.selection_start_cy = current;
+      E.selection_end_cy = current;
+      E.selection_start_cx = E.cx;
+      E.selection_end_cx = E.cx + strlen(query);
+      found = 1;
       break;
     }
   }
+
+  // If no match was found from this action, deactivate selection
+  if (!found) {
+      E.selection_active = 0;
+      last_match = -1;
+  }
 }
 
-/**
- * @brief Starts the search function.
- *        Prompts the user for the text to search for and highlights it.
- */
 void editorFind() {
   int saved_cx = E.cx, saved_cy = E.cy;
   int saved_coloff = E.coloff, saved_rowoff = E.rowoff;
+
   char *query = editorPrompt("Search: %s (Use ESC/Arrows/Enter)", editorFindCallback);
+
   if (query) {
     free(query);
-  }
-  else {
+  } else {
     E.cx = saved_cx; E.cy = saved_cy;
     E.coloff = saved_coloff; E.rowoff = saved_rowoff;
   }
-  E.hl_row = -1;
+  // Ensure selection is cleared and screen is refreshed when prompt is closed
+  E.selection_active = 0;
+  editorRefreshScreen();
 }
 
 /* append buffer */
