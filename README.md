@@ -64,5 +64,7 @@ Syntax highlighting rules are defined in `.json` files located in the `syntax/` 
 - `Esc` / `Ctrl-L`: Clear the current text selection.
 - **Arrow Keys**: Move the cursor.
 - **Home** / **End**: Move cursor to the beginning/end of the line.
+- `ALT+b`: Move cursor to the beginning of the line.
+- `ALT+e`: Move cursor to the end of the line.
 - **PageUp** / **PageDown**: Scroll the view up or down.
 - **Backspace** / **Delete**: Delete characters or selected text.

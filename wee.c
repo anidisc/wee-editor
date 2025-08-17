@@ -22,7 +22,7 @@
 
 /* defines */
 
-#define WEE_VERSION "0.84 Beta"
+#define WEE_VERSION "0.86 Beta"
 #define WEE_TAB_STOP 4
 #define WEE_QUIT_TIMES 2
 
@@ -38,7 +38,9 @@ enum editorKey {
   HOME_KEY,
   END_KEY,
   PAGE_UP,
-  PAGE_DOWN
+  PAGE_DOWN,
+  ALT_B,
+  ALT_E
 };
 
 enum editorHighlight {
@@ -192,8 +194,9 @@ int editorReadKey() {
   if (c == '\x1b') {
     char seq[3];
     if (read(STDIN_FILENO, &seq[0], 1) != 1) return '\x1b';
-    if (read(STDIN_FILENO, &seq[1], 1) != 1) return '\x1b';
+
     if (seq[0] == '[') {
+      if (read(STDIN_FILENO, &seq[1], 1) != 1) return '\x1b';
       if (seq[1] >= '0' && seq[1] <= '9') {
         if (read(STDIN_FILENO, &seq[2], 1) != 1) return '\x1b';
         if (seq[2] == '~') {
@@ -218,11 +221,16 @@ int editorReadKey() {
         }
       }
     } else if (seq[0] == 'O') {
+      if (read(STDIN_FILENO, &seq[1], 1) != 1) return '\x1b';
       switch (seq[1]) {
         case 'H': return HOME_KEY;
         case 'F': return END_KEY;
       }
+    } else {
+        if (seq[0] == 'b') return ALT_B;
+        if (seq[0] == 'e') return ALT_E;
     }
+
     return '\x1b';
   } else {
     return c;
@@ -1808,6 +1816,15 @@ void editorProcessKeypress() {
       case CTRL_KEY('t'): editorNewFile(); break;
       case CTRL_KEY('g'): editorShowHelp(); break;
       case CTRL_KEY('f'): editorFind(); break;
+      case HOME_KEY:
+      case ALT_B:
+        E.cx = 0;
+        break;
+      case END_KEY:
+      case ALT_E:
+        if (E.cy < E.numrows)
+          E.cx = E.row[E.cy].size;
+        break;
       case BACKSPACE:
       case CTRL_KEY('h'):
       case DEL_KEY:
@@ -1904,6 +1921,10 @@ void editorIndentSelection() {
       editorRowInsertChar(row, 0, ' ');
     }
   }
+
+  E.selection_start_cx += WEE_TAB_STOP;
+  E.selection_end_cx += WEE_TAB_STOP;
+
   E.dirty++;
 }
 
@@ -1920,12 +1941,22 @@ void editorUnindentSelection() {
 
   for (int i = start_cy; i <= end_cy; i++) {
     erow *row = &E.row[i];
+    int chars_deleted_count = 0;
     for (int j = 0; j < WEE_TAB_STOP; j++) {
       if (row->size > 0 && row->chars[0] == ' ') {
         editorRowDelChar(row, 0);
+        chars_deleted_count++;
       } else {
         break;
       }
+    }
+    if (i == E.selection_start_cy) {
+        E.selection_start_cx -= chars_deleted_count;
+        if (E.selection_start_cx < 0) E.selection_start_cx = 0;
+    }
+    if (i == E.selection_end_cy) {
+        E.selection_end_cx -= chars_deleted_count;
+        if (E.selection_end_cx < 0) E.selection_end_cx = 0;
     }
   }
   E.dirty++;
@@ -2109,6 +2140,8 @@ void editorShowHelp() {
         "Ctrl-W: Copy line",
         "Ctrl-K: Cut line",
         "Ctrl-U: Paste line",
+        "ALT+b: Move cursor to beginning of line",
+        "ALT+e: Move cursor to end of line",
         "",
         "Ctrl-G: Show this help screen",
         "",
