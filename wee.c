@@ -554,8 +554,27 @@ void editorDelChar() {
   if (E.cx == 0 && E.cy == 0) return;
   erow *row = &E.row[E.cy];
   if (E.cx > 0) {
-    editorRowDelChar(row, E.cx - 1);
-    E.cx--;
+    int is_tab_indent = 1;
+    if (E.cx >= WEE_TAB_STOP) {
+      for (int i = 1; i <= WEE_TAB_STOP; i++) {
+        if (row->chars[E.cx - i] != ' ') {
+          is_tab_indent = 0;
+          break;
+        }
+      }
+    } else {
+      is_tab_indent = 0;
+    }
+
+    if (is_tab_indent) {
+      for (int i = 0; i < WEE_TAB_STOP; i++) {
+        editorRowDelChar(row, E.cx - 1);
+        E.cx--;
+      }
+    } else {
+      editorRowDelChar(row, E.cx - 1);
+      E.cx--;
+    }
   } else {
     E.cx = E.row[E.cy - 1].size;
     editorRowAppendString(&E.row[E.cy - 1], row->chars, row->size);
@@ -1535,7 +1554,7 @@ void editorDrawStatusBar(struct abuf *ab) {
   
   char *basename = E.filename ? strrchr(E.filename, '/') : NULL;
   if (basename) {
-    basename = basename + 1;
+    basename++;
   } else {
     basename = E.filename;
   }
@@ -1564,7 +1583,7 @@ void editorDrawStatusBar(struct abuf *ab) {
   while (len < E.screencols) {
     if (E.screencols - len == rlen) {
       abAppend(ab, rstatus, rlen);
-      len += rlen;
+      break;
     } else {
       abAppend(ab, " ", 1);
       len++;
