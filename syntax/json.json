@@ -1,0 +1,11 @@
+{
+  "language": "JSON",
+  "filematch": [ ".json" ],
+  "keywords": [
+    "true|", "false|", "null|"
+  ],
+  "singleline_comment_start": null,
+  "multiline_comment_start": null,
+  "multiline_comment_end": null,
+  "flags": 3
+}

@@ -1,0 +1,16 @@
+{
+  "language": "Rust",
+  "filematch": [ ".rs" ],
+  "keywords": [
+    "as", "break", "const", "continue", "crate", "else", "enum", "extern",
+    "fn", "for", "if", "impl", "in", "let", "loop", "match", "mod", "move",
+    "mut", "pub", "ref", "return", "self", "Self", "static", "struct",
+    "super", "trait", "type", "unsafe", "use", "where", "while",
+    "async|", "await|", "dyn|",
+    "true|", "false|"
+  ],
+  "singleline_comment_start": "//",
+  "multiline_comment_start": "/*",
+  "multiline_comment_end": "*/",
+  "flags": 3
+}

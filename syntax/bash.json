@@ -1,0 +1,13 @@
+{
+  "language": "Bash",
+  "filematch": [ ".sh", ".bash" ],
+  "keywords": [
+    "if", "then", "else", "elif", "fi", "case", "esac", "for", "select",
+    "while", "until", "do", "done", "in", "function", "time",
+    "echo|", "read|", "let|", "export|", "unset|", "readonly|", "declare|", "local|"
+  ],
+  "singleline_comment_start": "#",
+  "multiline_comment_start": null,
+  "multiline_comment_end": null,
+  "flags": 3
+}
