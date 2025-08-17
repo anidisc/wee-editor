@@ -133,6 +133,8 @@ void editorUpdateSyntax(erow *row);
 void editorSelectSyntaxHighlight();
 void editorFreeSyntax();
 void editorUpdateSelectionSyntax();
+void editorIndentSelection();
+void editorUnindentSelection();
 
 
 
@@ -1732,6 +1734,12 @@ void editorProcessKeypress() {
         E.mode = NORMAL_MODE;
         editorSetStatusMessage("Selection cancelled.");
         break;
+      case '\t':
+        editorIndentSelection();
+        break;
+      case BACKSPACE:
+        editorUnindentSelection();
+        break;
       case DEL_KEY: // Delete selection
         editorDelCharSelection();
         E.mode = NORMAL_MODE;
@@ -1878,6 +1886,51 @@ void editorProcessKeypress() {
   }
   quit_times = WEE_QUIT_TIMES;
 }
+
+void editorIndentSelection() {
+  if (!E.selection_active) return;
+  int start_cy = E.selection_start_cy;
+  int end_cy = E.selection_end_cy;
+
+  if (start_cy > end_cy) {
+    int temp = start_cy;
+    start_cy = end_cy;
+    end_cy = temp;
+  }
+
+  for (int i = start_cy; i <= end_cy; i++) {
+    erow *row = &E.row[i];
+    for (int j = 0; j < WEE_TAB_STOP; j++) {
+      editorRowInsertChar(row, 0, ' ');
+    }
+  }
+  E.dirty++;
+}
+
+void editorUnindentSelection() {
+  if (!E.selection_active) return;
+  int start_cy = E.selection_start_cy;
+  int end_cy = E.selection_end_cy;
+
+  if (start_cy > end_cy) {
+    int temp = start_cy;
+    start_cy = end_cy;
+    end_cy = temp;
+  }
+
+  for (int i = start_cy; i <= end_cy; i++) {
+    erow *row = &E.row[i];
+    for (int j = 0; j < WEE_TAB_STOP; j++) {
+      if (row->size > 0 && row->chars[0] == ' ') {
+        editorRowDelChar(row, 0);
+      } else {
+        break;
+      }
+    }
+  }
+  E.dirty++;
+}
+
 
 /* file browser */
 
