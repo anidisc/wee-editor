@@ -22,7 +22,7 @@
 
 /* defines */
 
-#define WEE_VERSION "0.81 Beta"
+#define WEE_VERSION "0.83 Beta"
 #define WEE_TAB_STOP 4
 #define WEE_QUIT_TIMES 2
 
@@ -88,7 +88,7 @@ struct editorConfig {
   int numrows;
   erow *row;
   char *filename;
-  char statusmsg[80];
+  char statusmsg[256];
   time_t statusmsg_time;
   struct termios orig_termios;
   int dirty;
@@ -1113,7 +1113,7 @@ void editorSelectSyntaxHighlight() {
   while ((dir = readdir(d)) != NULL) {
     if (dir->d_name[0] == '.') continue;
 
-    char filepath[256];
+    char filepath[1024];
     snprintf(filepath, sizeof(filepath), "syntax/%s", dir->d_name);
 
     FILE *fp = fopen(filepath, "r");
@@ -1365,6 +1365,30 @@ void editorDrawRows(struct abuf *ab) {
         }
         while (padding--) abAppend(ab, " ", 1);
         abAppend(ab, welcome, welcomelen);
+      } else if (E.numrows == 0 && y == E.screenrows / 3 + 1) {
+        char author[80];
+        int authorlen = snprintf(author, sizeof(author), "by anidisc");
+        int text_cols = editorGetTextCols();
+        if (authorlen > text_cols) authorlen = text_cols;
+        int padding = (text_cols - authorlen) / 2;
+        if (padding) {
+          abAppend(ab, "~", 1);
+          padding--;
+        }
+        while (padding--) abAppend(ab, " ", 1);
+        abAppend(ab, author, authorlen);
+      } else if (E.numrows == 0 && y == E.screenrows / 3 + 2) {
+        char site[80];
+        int sitelen = snprintf(site, sizeof(site), "wee.anidisc.it");
+        int text_cols = editorGetTextCols();
+        if (sitelen > text_cols) sitelen = text_cols;
+        int padding = (text_cols - sitelen) / 2;
+        if (padding) {
+          abAppend(ab, "~", 1);
+          padding--;
+        }
+        while (padding--) abAppend(ab, " ", 1);
+        abAppend(ab, site, sitelen);
       } else {
         abAppend(ab, "~", 1);
       }
@@ -1497,17 +1521,39 @@ void editorDrawRows(struct abuf *ab) {
  */
 void editorDrawStatusBar(struct abuf *ab) {
   abAppend(ab, "\x1b[7m", 4);
-  char status[80], rstatus[80];
-  int len = snprintf(status, sizeof(status), "%.20s - %d lines %s",
-                    E.filename ? E.filename : "[No Name]", E.numrows,
-                    E.dirty ? "(modified)" : "");
+  
+  char *basename = E.filename ? strrchr(E.filename, '/') : NULL;
+  if (basename) {
+    basename++;
+  } else {
+    basename = E.filename;
+  }
+
+  char status[256];
+  int len = 0;
+
+  // File name part
+  abAppend(ab, "\x1b[37;44m", 7);
+  abAppend(ab, "[", 1);
+  abAppend(ab, basename ? basename : "No Name", strlen(basename ? basename : "No Name"));
+  abAppend(ab, "]", 1);
+  abAppend(ab, "\x1b[m", 3);
+  abAppend(ab, "\x1b[7m", 4);
+
+  len = 2 + strlen(basename ? basename : "No Name");
+
+  // Other info
+  int len2 = snprintf(status, sizeof(status), " - %d lines %s", E.numrows, E.dirty ? "(modified)" : "");
+  abAppend(ab, status, len2);
+  len += len2;
+
+  char rstatus[80];
   int rlen = snprintf(rstatus, sizeof(rstatus), "%s | %d/%d", E.syntax ? E.syntax->language : "no ft", E.cy + 1, E.numrows);
-  if (len > E.screencols) len = E.screencols;
-  abAppend(ab, status, len);
+  
   while (len < E.screencols) {
     if (E.screencols - len == rlen) {
       abAppend(ab, rstatus, rlen);
-      break;
+      len += rlen;
     } else {
       abAppend(ab, " ", 1);
       len++;
@@ -1963,6 +2009,8 @@ void editorShowHelp() {
         "Wee Editor - Help",
         "",
         "Version: " WEE_VERSION,
+        "Author: anidisc",
+        "Website: wee.anidisc.it",
         "",
         "--- Keybindings ---",
         "Ctrl-S: Save file",
@@ -2053,7 +2101,7 @@ int main(int argc, char *argv[]) {
     editorOpen(argv[1]);
   }
   editorSetStatusMessage(
-      "HELP: C-S=save | C-Y=save as | C-T=new | C-O=open | C-Q=quit | C-F=find | C-N=lines | C-A=select all | C-W=copy | C-K=cut | C-U=paste | C-G=help");
+      "HELP: Ctrl-S Save | Ctrl-Q Quit | Ctrl-F Find | Ctrl-G Help");
   while (1) {
     editorRefreshScreen();
     editorProcessKeypress();
