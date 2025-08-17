@@ -22,7 +22,7 @@
 
 /* defines */
 
-#define WEE_VERSION "0.83 Beta"
+#define WEE_VERSION "0.84 Beta"
 #define WEE_TAB_STOP 4
 #define WEE_QUIT_TIMES 2
 
@@ -418,6 +418,17 @@ void editorInsertChar(int c) {
   }
   editorRowInsertChar(&E.row[E.cy], E.cx, c);
   E.cx++;
+  char closing_char = 0;
+  switch (c) {
+    case '(': closing_char = ')'; break;
+    case '[': closing_char = ']'; break;
+    case '{': closing_char = '}'; break;
+    case '"': closing_char = '"'; break;
+    case '\'': closing_char = '\''; break;
+  }
+  if (closing_char) {
+    editorRowInsertChar(&E.row[E.cy], E.cx, closing_char);
+  }
 }
 
 /**
@@ -1524,7 +1535,7 @@ void editorDrawStatusBar(struct abuf *ab) {
   
   char *basename = E.filename ? strrchr(E.filename, '/') : NULL;
   if (basename) {
-    basename++;
+    basename = basename + 1;
   } else {
     basename = E.filename;
   }
