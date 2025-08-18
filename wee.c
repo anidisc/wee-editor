@@ -7,7 +7,7 @@
 #include <ctype.h>
 #include <dirent.h>
 #include <errno.h>
-#include <fcntl.h> 
+#include <fcntl.h>
 #include <stdarg.h>
 #include <stdio.h> 
 #include <stdlib.h> 
@@ -40,7 +40,8 @@ enum editorKey {
   PAGE_UP,
   PAGE_DOWN,
   ALT_B,
-  ALT_E
+  ALT_E,
+  CTRL_ALT_SPACE // New enum value
 };
 
 enum editorHighlight {
@@ -139,6 +140,8 @@ void editorIndentSelection();
 void editorUnindentSelection();
 void editorMoveSelection(int key);
 void editorJumpToLine();
+void editorInsertEmptyLine();
+void editorDeleteEmptyLineBelow();
 
 
 /* terminal */
@@ -227,6 +230,13 @@ int editorReadKey() {
         case 'H': return HOME_KEY;
         case 'F': return END_KEY;
       }
+    } else if (seq[0] == '\x1b') { // This means we got ESC ESC
+      if (read(STDIN_FILENO, &seq[1], 1) != 1) return '\x1b'; // Read char after ESC ESC
+      if (seq[1] == ' ') { // If it's a space, then it's Ctrl+Alt+Space
+        return CTRL_ALT_SPACE;
+      }
+      // If it's ESC ESC but not followed by space, it's just ESC ESC, return ESC
+      return '\x1b';
     } else {
         if (seq[0] == 'b') return ALT_B;
         if (seq[0] == 'e') return ALT_E;
@@ -904,7 +914,8 @@ void editorCutLine() {
   if (E.cy >= E.numrows && E.numrows > 0) {
     E.cy = E.numrows - 1;
     E.cx = E.row[E.cy].size;
-  } else if (E.numrows == 0) {
+  }
+  else if (E.numrows == 0) {
     E.cy = 0;
     E.cx = 0;
   }
@@ -1250,7 +1261,8 @@ void editorFindCallback(char *query, int key) {
     return;
   } else if (key == ARROW_RIGHT || key == ARROW_DOWN) {
     direction = 1;
-  } else if (key == ARROW_LEFT || key == ARROW_UP) {
+  }
+  else if (key == ARROW_LEFT || key == ARROW_UP) {
     direction = -1;
   }
   else { // Any other key resets search
@@ -1572,7 +1584,8 @@ void editorDrawStatusBar(struct abuf *ab) {
   char *basename = E.filename ? strrchr(E.filename, '/') : NULL;
   if (basename) {
     basename++;
-  } else {
+  }
+  else {
     basename = E.filename;
   }
 
@@ -1830,6 +1843,8 @@ void editorProcessKeypress() {
       case CTRL_KEY('g'): editorShowHelp(); break;
       case CTRL_KEY('f'): editorFind(); break;
       case CTRL_KEY('j'): editorJumpToLine(); break;
+      case CTRL_KEY(' '): editorInsertEmptyLine(); break; // Ctrl+Space
+      case CTRL_ALT_SPACE: editorDeleteEmptyLineBelow(); break; // Ctrl+Alt+Space
       case HOME_KEY:
       case ALT_B:
         E.cx = 0;
@@ -2108,6 +2123,33 @@ void editorJumpToLine() {
   editorSetStatusMessage("Jumped to line %d.", target_line);
 }
 
+// Function to insert an empty line below the current cursor position
+void editorInsertEmptyLine() {
+  // Insert a new row below the current line
+  editorInsertRow(E.cy + 1, "", 0);
+  // The cursor remains in its original position
+  editorSetStatusMessage("Empty line inserted.");
+}
+
+// Function to delete the line below the cursor, only if it's empty
+void editorDeleteEmptyLineBelow() {
+  // Check if there's a line below the cursor
+  if (E.cy + 1 >= E.numrows) {
+    editorSetStatusMessage("No line below to delete.");
+    return;
+  }
+
+  erow *line_below = &E.row[E.cy + 1];
+
+  // Check if the line below is empty
+  if (line_below->size == 0) {
+    editorDelRow(E.cy + 1);
+    editorSetStatusMessage("Empty line deleted.");
+  } else {
+    editorSetStatusMessage("Line below is not empty. Cannot delete.");
+  }
+}
+
 
 /* file browser */
 
@@ -2274,6 +2316,9 @@ void editorShowHelp() {
         "",
         "Ctrl-J: Jump to Line",
         "",
+        "Ctrl-Space: Insert Empty Line Below", // Added
+        "Ctrl-Alt-Space: Delete Empty Line Below (if empty)", // Added
+        "", // Added for spacing
         "Ctrl-B: Start Selection",
         "Ctrl-E: End Selection & Enter Selection Mode",
         "Ctrl-A: Select All",
