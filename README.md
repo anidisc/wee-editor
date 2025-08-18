@@ -13,7 +13,7 @@ A lightweight, terminal-based text editor written in C.
 - **Core Editing**: Basic text manipulation (insert, delete characters, newlines).
 - **Find**: Incremental search within the file (`Ctrl-F`).
 - **Jump to Line**: Quickly navigate to a specific line number (`Ctrl-J`).
-- **Standard Navigation**: Arrow keys, Home, End, PageUp, PageDown.
+- **Standard Navigation**: Arrow Keys, Home, End, PageUp, PageDown.
 - **Save & Quit**: Save functionality (`Ctrl-S`) and a safe quit (`Ctrl-Q`) with a warning for unsaved changes.
 - **Save As**: Save the current file with a new name (`Ctrl-Y`).
 - **Line-based Clipboard**: Copy (`Ctrl-W`), cut (`Ctrl-K`), and paste (`Ctrl-U`) entire lines.

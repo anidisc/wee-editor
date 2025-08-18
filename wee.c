@@ -22,7 +22,7 @@
 
 /* defines */
 
-#define WEE_VERSION "0.87 Beta"
+#define WEE_VERSION "0.87.1 Beta"
 #define WEE_TAB_STOP 4
 #define WEE_QUIT_TIMES 2
 
@@ -586,7 +586,8 @@ void editorDelChar() {
       editorRowDelChar(row, E.cx - 1);
       E.cx--;
     }
-  } else {
+  }
+  else {
     E.cx = E.row[E.cy - 1].size;
     editorRowAppendString(&E.row[E.cy - 1], row->chars, row->size);
     editorDelRow(E.cy);
@@ -1435,7 +1436,8 @@ void editorDrawRows(struct abuf *ab) {
       } else {
         abAppend(ab, "~", 1);
       }
-    } else {
+    }
+    else {
       if (E.linenumbers) {
         char linenum_buf[16];
         int len = snprintf(linenum_buf, sizeof(linenum_buf), "%*d ", linenum_width - 1, filerow + 1); 
@@ -2020,72 +2022,61 @@ void editorMoveSelection(int key) {
     case ARROW_UP: {
       if (start_cy == 0) return; // Cannot move further up
 
-      // Preserve user's clipboard
-      char *temp_clipboard = E.clipboard;
-      int temp_clipboard_len = E.clipboard_len;
-      E.clipboard = NULL;
-      E.clipboard_len = 0;
+      int sel_height = end_cy - start_cy + 1;
+      erow temp_selected_block[sel_height];
+      for (int i = 0; i < sel_height; i++) {
+        temp_selected_block[i] = E.row[start_cy + i];
+      }
 
-      editorCutSelection(); // Cuts the normalized selection into E.clipboard
+      // Shift the line above the selection down to the end of the selected block's original position
+      E.row[end_cy] = E.row[start_cy - 1];
 
-      // Move cursor to the line above the original selection start
-      E.cy = start_cy - 1;
-      E.cx = 0;
+      // Place the selected block at its new position (one line up)
+      for (int i = 0; i < sel_height; i++) {
+        E.row[start_cy - 1 + i] = temp_selected_block[i];
+      }
 
-      // Store the starting point for the new selection
-      E.selection_start_cy = E.cy;
-      E.selection_start_cx = E.cx;
+      // Update idx fields and re-highlight for affected rows
+      for (int i = start_cy - 1; i <= end_cy; i++) {
+        E.row[i].idx = i;
+        editorUpdateSyntax(&E.row[i]);
+      }
 
-      editorPaste(); // Paste content, E.cx and E.cy will be at the end
+      // Update selection coordinates
+      E.selection_start_cy--;
+      E.selection_end_cy--;
 
-      // The new selection end is the current cursor position
-      E.selection_end_cy = E.cy;
-      E.selection_end_cx = E.cx;
-
-      // Reactivate selection mode
-      E.selection_active = 1;
-      E.mode = SELECTION_MODE;
-
-      // Restore user's clipboard
-      free(E.clipboard); // Free the clipboard used for the move operation
-      E.clipboard = temp_clipboard;
-      E.clipboard_len = temp_clipboard_len;
+      E.dirty++;
       break;
     }
     case ARROW_DOWN: {
-      if (end_cy >= E.numrows - 1) return; // Cannot move further down
+      if (end_cy == E.numrows - 1) return; // Cannot move further down
 
-      // Preserve user's clipboard
-      char *temp_clipboard = E.clipboard;
-      int temp_clipboard_len = E.clipboard_len;
-      E.clipboard = NULL;
-      E.clipboard_len = 0;
+      int sel_height = end_cy - start_cy + 1;
+      erow temp_selected_block[sel_height];
+      for (int i = 0; i < sel_height; i++) {
+        temp_selected_block[i] = E.row[start_cy + i];
+      }
 
-      editorCutSelection(); // Cuts the normalized selection into E.clipboard
+      // Shift the line below the selection up to the start of the selected block's original position
+      E.row[start_cy] = E.row[end_cy + 1];
 
-      // Move cursor to the line that was below the original selection
-      // After cut, E.cy is original start_cy. The line below original end_cy is now at E.cy + 1
-      E.cy = start_cy + 1;
-      E.cx = 0;
+      // Place the selected block at its new position (one line down)
+      for (int i = 0; i < sel_height; i++) {
+        E.row[start_cy + 1 + i] = temp_selected_block[i];
+      }
 
-      // Store the starting point for the new selection
-      E.selection_start_cy = E.cy;
-      E.selection_start_cx = E.cx;
+      // Update idx fields and re-highlight for affected rows
+      for (int i = start_cy; i <= end_cy + 1; i++) {
+        E.row[i].idx = i;
+        editorUpdateSyntax(&E.row[i]);
+      }
 
-      editorPaste(); // Paste content, E.cx and E.cy will be at the end
+      // Update selection coordinates
+      E.selection_start_cy++;
+      E.selection_end_cy++;
 
-      // The new selection end is the current cursor position
-      E.selection_end_cy = E.cy;
-      E.selection_end_cx = E.cx;
-
-      // Reactivate selection mode
-      E.selection_active = 1;
-      E.mode = SELECTION_MODE;
-
-      // Restore user's clipboard
-      free(E.clipboard); // Free the clipboard used for the move operation
-      E.clipboard = temp_clipboard;
-      E.clipboard_len = temp_clipboard_len;
+      E.dirty++;
       break;
     }
   }
