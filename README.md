@@ -6,11 +6,13 @@ A lightweight, terminal-based text editor written in C.
 
 - **Text Selection**: Select a block of text by marking a start point (`Ctrl-B`) and an end point (`Ctrl-E`). The selected text will be highlighted.
 - **Operations on Selection**: Perform copy (`Ctrl-W`), cut (`Ctrl-K`), paste (`Ctrl-U`), or delete (`Delete`/`Backspace`) operations on the selected text.
+- **Move Selection**: Move selected text up/down/left/right using arrow keys in selection mode.
 - **Deselection**: Clear the current selection by pressing `Esc` or `Ctrl-L`.
 - **Syntax Highlighting**: Extensible syntax highlighting for different programming languages (C and Python included by default).
 - **File Browser**: A built-in file browser to visually navigate and open files (`Ctrl-O`).
 - **Core Editing**: Basic text manipulation (insert, delete characters, newlines).
 - **Find**: Incremental search within the file (`Ctrl-F`).
+- **Jump to Line**: Quickly navigate to a specific line number (`Ctrl-J`).
 - **Standard Navigation**: Arrow keys, Home, End, PageUp, PageDown.
 - **Save & Quit**: Save functionality (`Ctrl-S`) and a safe quit (`Ctrl-Q`) with a warning for unsaved changes.
 - **Save As**: Save the current file with a new name (`Ctrl-Y`).
@@ -22,7 +24,7 @@ A lightweight, terminal-based text editor written in C.
 
 ## Building
 
-The project uses a `Makefile` for compilation. The only dependency is `cJSON`, which is included in the repository.
+The project uses a `Makefile` for compilation.
 
 To compile the editor, simply run `make`:
 
@@ -53,6 +55,7 @@ Syntax highlighting rules are defined in `.json` files located in the `syntax/` 
 - `Ctrl-Q`: Quit the editor.
 - `Ctrl-O`: Open the file browser to select a file.
 - `Ctrl-F`: Search for text within the file.
+- `Ctrl-J`: Jump to a specific line number.
 - `Ctrl-T`: New empty file.
 - `Ctrl-G`: Show the help screen.
 - `Ctrl-N`: Toggle line numbers.
@@ -63,6 +66,7 @@ Syntax highlighting rules are defined in `.json` files located in the `syntax/` 
 - `Ctrl-E`: Mark the end of a text selection.
 - `Esc` / `Ctrl-L`: Clear the current text selection.
 - **Arrow Keys**: Move the cursor.
+- **Arrow Keys (in Sel. Mode)**: Move selected text.
 - **Home** / **End**: Move cursor to the beginning/end of the line.
 - `ALT+b`: Move cursor to the beginning of the line.
 - `ALT+e`: Move cursor to the end of the line.

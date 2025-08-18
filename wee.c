@@ -7,22 +7,22 @@
 #include <ctype.h>
 #include <dirent.h>
 #include <errno.h>
-#include <fcntl.h>
+#include <fcntl.h> 
 #include <stdarg.h>
-#include <stdio.h>
-#include <stdlib.h>
+#include <stdio.h> 
+#include <stdlib.h> 
 #include <string.h>
 #include <sys/ioctl.h>
-#include <sys/stat.h>
-#include <sys/types.h>
+#include <sys/stat.h> 
+#include <sys/types.h> 
 #include <termios.h>
-#include <time.h>
-#include <unistd.h>
+#include <time.h> 
+#include <unistd.h> 
 #include "cJSON.h"
 
 /* defines */
 
-#define WEE_VERSION "0.86 Beta"
+#define WEE_VERSION "0.87 Beta"
 #define WEE_TAB_STOP 4
 #define WEE_QUIT_TIMES 2
 
@@ -137,7 +137,8 @@ void editorFreeSyntax();
 void editorUpdateSelectionSyntax();
 void editorIndentSelection();
 void editorUnindentSelection();
-
+void editorMoveSelection(int key);
+void editorJumpToLine();
 
 
 /* terminal */
@@ -645,7 +646,6 @@ int editorAskToSave() {
 
 /**
  * @brief Opens a file and loads its content into the editor.
- *        If there are unsaved changes, it asks the user what to do.
  * @param filename The path of the file to open.
  */
 void editorOpen(char *filename) {
@@ -1118,7 +1118,7 @@ void editorFreeSyntax() {
  *        to remove HL_SELECTION highlighting.
  */
 void editorUpdateSelectionSyntax() {
-  if (E.numrows == 0) return;
+  if (E.numrows == 0) return; 
   
   int start_cy = E.selection_start_cy;
   int end_cy = E.selection_end_cy;
@@ -1251,7 +1251,8 @@ void editorFindCallback(char *query, int key) {
     direction = 1;
   } else if (key == ARROW_LEFT || key == ARROW_UP) {
     direction = -1;
-  } else {
+  }
+  else { // Any other key resets search
     last_match = -1;
     direction = 1;
   }
@@ -1300,7 +1301,8 @@ void editorFind() {
 
   if (query) {
     free(query);
-  } else {
+  }
+  else {
     E.cx = saved_cx; E.cy = saved_cy;
     E.coloff = saved_coloff; E.rowoff = saved_rowoff;
   }
@@ -1377,17 +1379,18 @@ void editorScroll() {
 /**
  * @brief Draws the visible text rows on the screen.
  * @param ab The append buffer to add the text to be drawn to.
+ * @param linenum_width The width of the line number column.
  */
 void editorDrawRows(struct abuf *ab) {
   int linenum_width = 0;
   if (E.linenumbers) {
     int max_linenum_digits = 1;
     if (E.numrows > 0) {
-        int temp_num = E.numrows;
-        while (temp_num /= 10) max_linenum_digits++;
-    }
-    linenum_width = max_linenum_digits + 1;
-    if (linenum_width < 4) linenum_width = 4;
+            int temp_num = E.numrows;
+            while (temp_num /= 10) max_linenum_digits++;
+        }
+        linenum_width = max_linenum_digits + 1;
+        if (linenum_width < 4) linenum_width = 4;
   }
 
   for (int y = 0; y < E.screenrows; y++) {
@@ -1476,13 +1479,15 @@ void editorDrawRows(struct abuf *ab) {
               // Current row is within the selection range
               if (filerow == local_sel_start_cy) {
                   sel_start_rx = editorRowCxToRx(&E.row[filerow], local_sel_start_cx);
-              } else {
+              }
+              else {
                   sel_start_rx = 0; // Start from the beginning of the row
               }
 
               if (filerow == local_sel_end_cy) {
                   sel_end_rx = editorRowCxToRx(&E.row[filerow], local_sel_end_cx);
-              } else {
+              }
+              else {
                   sel_end_rx = E.row[filerow].rsize; // Go to the end of the row
               }
           }
@@ -1754,6 +1759,12 @@ void editorProcessKeypress() {
         editorSetStatusMessage("Selection deleted.");
         editorRefreshScreen(); // Add this
         break;
+      case ARROW_UP:
+      case ARROW_DOWN:
+      case ARROW_LEFT:
+      case ARROW_RIGHT:
+        editorMoveSelection(c);
+        break;
       case CTRL_KEY('w'): // Copy selection
         editorCopySelection(); // This already sets E.selection_active = 0
         E.mode = NORMAL_MODE;
@@ -1816,6 +1827,7 @@ void editorProcessKeypress() {
       case CTRL_KEY('t'): editorNewFile(); break;
       case CTRL_KEY('g'): editorShowHelp(); break;
       case CTRL_KEY('f'): editorFind(); break;
+      case CTRL_KEY('j'): editorJumpToLine(); break;
       case HOME_KEY:
       case ALT_B:
         E.cx = 0;
@@ -1962,6 +1974,149 @@ void editorUnindentSelection() {
   E.dirty++;
 }
 
+void editorMoveSelection(int key) {
+  // Get current selection bounds and normalize them
+  int start_cx = E.selection_start_cx;
+  int start_cy = E.selection_start_cy;
+  int end_cx = E.selection_end_cx;
+  int end_cy = E.selection_end_cy;
+
+  if (start_cy > end_cy || (start_cy == end_cy && start_cx > end_cx)) {
+    int temp_cx = start_cx;
+    int temp_cy = start_cy;
+    start_cx = end_cx;
+    start_cy = end_cy;
+    end_cx = temp_cx;
+    end_cy = temp_cy;
+  }
+
+  switch (key) {
+    case ARROW_LEFT: {
+      for (int i = start_cy; i <= end_cy; i++) {
+        erow *row = &E.row[i];
+        if (row->size > 0 && row->chars[0] == ' ') {
+          editorRowDelChar(row, 0);
+          if (i == E.selection_start_cy) {
+            if (E.selection_start_cx > 0) E.selection_start_cx--;
+          }
+          if (i == E.selection_end_cy) {
+            if (E.selection_end_cx > 0) E.selection_end_cx--;
+          }
+        }
+      }
+      E.dirty++;
+      break;
+    }
+    case ARROW_RIGHT: {
+      for (int i = start_cy; i <= end_cy; i++) {
+        erow *row = &E.row[i];
+        editorRowInsertChar(row, 0, ' ');
+      }
+      E.selection_start_cx++;
+      E.selection_end_cx++;
+      E.dirty++;
+      break;
+    }
+    case ARROW_UP: {
+      if (start_cy == 0) return; // Cannot move further up
+
+      // Preserve user's clipboard
+      char *temp_clipboard = E.clipboard;
+      int temp_clipboard_len = E.clipboard_len;
+      E.clipboard = NULL;
+      E.clipboard_len = 0;
+
+      editorCutSelection(); // Cuts the normalized selection into E.clipboard
+
+      // Move cursor to the line above the original selection start
+      E.cy = start_cy - 1;
+      E.cx = 0;
+
+      // Store the starting point for the new selection
+      E.selection_start_cy = E.cy;
+      E.selection_start_cx = E.cx;
+
+      editorPaste(); // Paste content, E.cx and E.cy will be at the end
+
+      // The new selection end is the current cursor position
+      E.selection_end_cy = E.cy;
+      E.selection_end_cx = E.cx;
+
+      // Reactivate selection mode
+      E.selection_active = 1;
+      E.mode = SELECTION_MODE;
+
+      // Restore user's clipboard
+      free(E.clipboard); // Free the clipboard used for the move operation
+      E.clipboard = temp_clipboard;
+      E.clipboard_len = temp_clipboard_len;
+      break;
+    }
+    case ARROW_DOWN: {
+      if (end_cy >= E.numrows - 1) return; // Cannot move further down
+
+      // Preserve user's clipboard
+      char *temp_clipboard = E.clipboard;
+      int temp_clipboard_len = E.clipboard_len;
+      E.clipboard = NULL;
+      E.clipboard_len = 0;
+
+      editorCutSelection(); // Cuts the normalized selection into E.clipboard
+
+      // Move cursor to the line that was below the original selection
+      // After cut, E.cy is original start_cy. The line below original end_cy is now at E.cy + 1
+      E.cy = start_cy + 1;
+      E.cx = 0;
+
+      // Store the starting point for the new selection
+      E.selection_start_cy = E.cy;
+      E.selection_start_cx = E.cx;
+
+      editorPaste(); // Paste content, E.cx and E.cy will be at the end
+
+      // The new selection end is the current cursor position
+      E.selection_end_cy = E.cy;
+      E.selection_end_cx = E.cx;
+
+      // Reactivate selection mode
+      E.selection_active = 1;
+      E.mode = SELECTION_MODE;
+
+      // Restore user's clipboard
+      free(E.clipboard); // Free the clipboard used for the move operation
+      E.clipboard = temp_clipboard;
+      E.clipboard_len = temp_clipboard_len;
+      break;
+    }
+  }
+}
+
+void editorJumpToLine() {
+  char *line_str = editorPrompt("Go to line: %s (ESC to cancel)", NULL);
+  if (line_str == NULL) {
+    editorSetStatusMessage("Jump cancelled.");
+    return;
+  }
+
+  // Convert string to integer
+  int target_line = atoi(line_str);
+  free(line_str); // Free the allocated string
+
+  // Validate the line number
+  if (target_line <= 0 || target_line > E.numrows) {
+    editorSetStatusMessage("Invalid line number: %d. Total lines: %d.", target_line, E.numrows);
+    return;
+  }
+
+  // Adjust for 0-based indexing (user input is usually 1-based)
+  E.cy = target_line - 1;
+  E.cx = 0; // Move cursor to the beginning of the target line
+
+  // Ensure cursor is visible
+  editorScroll();
+  editorSetStatusMessage("Jumped to line %d.", target_line);
+}
+
 
 /* file browser */
 
@@ -1998,195 +2153,193 @@ char *editorFileBrowser(const char *initial_path) {
     int num_items = 0;
     char **items = NULL;
     int selected = 0;
-    int scroll_offset = 0;
+    int offset = 0;
 
     while (1) {
-        // Populate file list
-        DIR *d = opendir(path);
-        if (!d) {
+        num_items = 0;
+        items = NULL;
+
+        DIR *dir = opendir(path);
+        if (!dir) {
             editorSetStatusMessage("Cannot open directory: %s", strerror(errno));
+            free(path);
             return NULL;
         }
 
-        struct dirent *dir;
-        num_items = 0;
-        items = malloc(sizeof(char *));
-        
-        while ((dir = readdir(d)) != NULL) {
-            if (strcmp(dir->d_name, ".") == 0) continue;
+        struct dirent *entry;
+        while ((entry = readdir(dir)) != NULL) {
+            if (strcmp(entry->d_name, ".") == 0) continue;
             items = realloc(items, sizeof(char *) * (num_items + 1));
             char full_path[1024];
-            snprintf(full_path, sizeof(full_path), "%s/%s", path, dir->d_name);
-            items[num_items] = strdup(full_path);
-            num_items++;
+            snprintf(full_path, sizeof(full_path), "%s/%s", path, entry->d_name);
+            items[num_items++] = strdup(full_path);
         }
-        closedir(d);
+        closedir(dir);
+
         qsort(items, num_items, sizeof(char *), file_compare);
 
-        // Browser loop
-        int browser_done = 0;
-        while (!browser_done) {
-            // Draw browser
-            struct abuf ab = ABUF_INIT;
-            abAppend(&ab, "\x1b[?25l", 6);
-            abAppend(&ab, "\x1b[H", 3);
-            
-            char header[1024];
-            int header_len = snprintf(header, sizeof(header), "Open File: %.80s", path);
-            if (header_len > E.screencols) header_len = E.screencols;
-            abAppend(&ab, "\x1b[7m", 4);
-            abAppend(&ab, header, header_len);
-            for (int i = header_len; i < E.screencols; i++) abAppend(&ab, " ", 1);
-            abAppend(&ab, "\x1b[m", 3);
+        struct abuf ab = ABUF_INIT;
+        abAppend(&ab, "\x1b[?25l", 6);
+        abAppend(&ab, "\x1b[2J", 4);
+        abAppend(&ab, "\x1b[H", 3);
+
+        char header[1024];
+        snprintf(header, sizeof(header), "File Browser: %s", path);
+        int header_len = strlen(header);
+        if (header_len > E.screencols) header_len = E.screencols;
+        abAppend(&ab, header, header_len);
+        for (int i = header_len; i < E.screencols; i++) abAppend(&ab, " ", 1);
+        abAppend(&ab, "\x1b[m", 3);
+        abAppend(&ab, "\r\n", 2);
+
+        int display_rows = E.screenrows - 2;
+        if (selected >= offset + display_rows) offset = selected - display_rows + 1;
+        if (selected < offset) offset = selected;
+
+        for (int i = 0; i < display_rows; i++) {
+            int index = i + offset;
+            if (index >= num_items) break;
+
+            char *item_path = items[index];
+            char *item_name = strrchr(item_path, '/');
+            item_name = item_name ? item_name + 1 : item_path;
+
+            struct stat st;
+            stat(item_path, &st);
+
+            char display_str[256];
+            snprintf(display_str, sizeof(display_str), "%s%s", item_name, S_ISDIR(st.st_mode) ? "/" : "");
+
+            int len = strlen(display_str);
+            if (len > E.screencols) len = E.screencols;
+
+            if (index == selected) abAppend(&ab, "\x1b[7m", 4);
+            abAppend(&ab, display_str, len);
+            if (index == selected) abAppend(&ab, "\x1b[m", 3);
+            abAppend(&ab, "\x1b[K", 3);
             abAppend(&ab, "\r\n", 2);
+        }
 
-            for (int i = 0; i < E.screenrows -1; i++) {
-                int item_idx = i + scroll_offset;
-                if (item_idx < num_items) {
-                    char *item_name = strrchr(items[item_idx], '/');
-                    if (item_name) item_name++; else item_name = items[item_idx];
+        write(STDOUT_FILENO, ab.b, ab.len);
+        abFree(&ab);
 
+        int c = editorReadKey();
+
+        // Get selected_path before freeing items
+        char *current_selected_path = NULL;
+        if (c == '\r' && selected < num_items) {
+            current_selected_path = realpath(items[selected], NULL);
+        }
+
+        for (int i = 0; i < num_items; i++) free(items[i]);
+        free(items);
+
+        switch (c) {
+            case '\r': {
+                if (current_selected_path) {
                     struct stat st;
-                    char display_name[256];
-                    stat(items[item_idx], &st);
-                    snprintf(display_name, sizeof(display_name), "%s%s", item_name, S_ISDIR(st.st_mode) ? "/" : "");
-
-                    if (item_idx == selected) abAppend(&ab, "\x1b[7m", 4);
-                    abAppend(&ab, display_name, strlen(display_name));
-                    if (item_idx == selected) abAppend(&ab, "\x1b[m", 3);
-                }
-                abAppend(&ab, "\x1b[K", 3);
-                abAppend(&ab, "\r\n", 2);
-            }
-            write(STDOUT_FILENO, ab.b, ab.len);
-            abFree(&ab);
-
-            // Process input
-            int c = editorReadKey();
-            switch (c) {
-                case '\x1b': // ESC
-                    for(int i=0; i<num_items; i++) free(items[i]);
-                    free(items);
-                    free(path);
-                    editorSetStatusMessage("");
-                    return NULL;
-                case '\r': { // ENTER
-                    struct stat st;
-                    if (stat(items[selected], &st) == 0) {
-                        if (S_ISDIR(st.st_mode)) {
-                            free(path);
-                            path = realpath(items[selected], NULL);
-                            for(int i=0; i<num_items; i++) free(items[i]);
-                            free(items);
-                            selected = 0;
-                            scroll_offset = 0;
-                            browser_done = 1; // Exit inner loop to repopulate
-                        } else {
-                            char *result = strdup(items[selected]);
-                            for(int i=0; i<num_items; i++) free(items[i]);
-                            free(items);
-                            free(path);
-                            return result;
-                        }
+                    stat(current_selected_path, &st);
+                    if (S_ISDIR(st.st_mode)) {
+                        free(path);
+                        path = current_selected_path;
+                        selected = 0;
+                        offset = 0;
+                    } else {
+                        free(path);
+                        return current_selected_path;
                     }
-                } break;
-                case ARROW_UP:
-                    if (selected > 0) selected--;
-                    if (selected < scroll_offset) scroll_offset = selected;
-                    break;
-                case ARROW_DOWN:
-                    if (selected < num_items - 1) selected++;
-                    if (selected >= scroll_offset + E.screenrows -1) scroll_offset++;
-                    break;
-                case PAGE_UP:
-                    selected -= E.screenrows -1;
-                    if (selected < 0) selected = 0;
-                    scroll_offset = selected;
-                    break;
-                case PAGE_DOWN:
-                    selected += E.screenrows -1;
-                    if (selected >= num_items) selected = num_items -1;
-                    scroll_offset = selected - (E.screenrows - 2);
-                    if (scroll_offset < 0) scroll_offset = 0;
-                    break;
+                } else {
+                    // Handle case where realpath failed or selected was out of bounds
+                    editorSetStatusMessage("Error: Could not resolve path.");
+                }
+                break;
             }
+            case ARROW_UP:
+                if (selected > 0) selected--;
+                break;
+            case ARROW_DOWN:
+                if (selected < num_items - 1) selected++;
+                break;
+            case '\x1b':
+                free(path);
+                return NULL;
         }
     }
 }
 
-/* help screen */
-/**
- * @brief Displays a help screen with the main commands.
- */
 void editorShowHelp() {
-    const char *help_lines[] = {
-        "Wee Editor - Help",
+    // Create a temporary buffer to hold the help text
+    const char *help_text[] = {
+        "Wee Editor Help",
         "",
-        "Version: " WEE_VERSION,
-        "Author: anidisc",
-        "Website: wee.anidisc.it",
-        "",
-        "--- Keybindings ---",
-        "Ctrl-S: Save file",
-        "Ctrl-Y: Save As...",
-        "Ctrl-O: Open file (File Browser)",
-        "Ctrl-T: New empty file",
+        "Ctrl-S: Save",
+        "Ctrl-Y: Save As",
         "Ctrl-Q: Quit",
+        "Ctrl-F: Find",
+        "Ctrl-O: Open File Browser",
+        "Ctrl-N: Toggle Line Numbers",
+        "Ctrl-T: New File",
+        "Ctrl-G: Show this Help",
         "",
-        "Ctrl-F: Find text",
-        "Ctrl-N: Toggle line numbers",
+        "Ctrl-J: Jump to Line",
         "",
-        "Ctrl-A: Select all text",
-        "Ctrl-W: Copy line",
-        "Ctrl-K: Cut line",
-        "Ctrl-U: Paste line",
-        "ALT+b: Move cursor to beginning of line",
-        "ALT+e: Move cursor to end of line",
+        "Ctrl-B: Start Selection",
+        "Ctrl-E: End Selection & Enter Selection Mode",
+        "Ctrl-A: Select All",
+        "ESC (in Sel. Mode): Cancel Selection",
+        "Ctrl-W (in Sel. Mode): Copy Selection",
+        "Ctrl-K (in Sel. Mode): Cut Selection",
+        "DEL (in Sel. Mode): Delete Selection",
+        "Arrows (in Sel. Mode): Move Selection (Up/Down/Left/Right)",
         "",
-        "Ctrl-G: Show this help screen",
-        "",
-        "Press ESC, Q, or Ctrl-G to close this screen.",
+        "Ctrl-W: Copy Line",
+        "Ctrl-K: Cut Line",
+        "Ctrl-U: Paste",
         NULL
     };
 
     struct abuf ab = ABUF_INIT;
-    abAppend(&ab, "\x1b[2J", 4);
-    abAppend(&ab, "\x1b[H", 3);
+    abAppend(&ab, "\x1b[2J", 4); // Clear screen
+    abAppend(&ab, "\x1b[H", 3);  // Go to home
 
-    for (int i = 0; help_lines[i] != NULL; i++) {
-        int padding = (E.screencols - strlen(help_lines[i])) / 2;
-        if (padding < 0) padding = 0;
-        while (padding--) abAppend(&ab, " ", 1);
-        abAppend(&ab, help_lines[i], strlen(help_lines[i]));
+    int y = 0;
+    for (y = 0; help_text[y] != NULL; y++) {
+        abAppend(&ab, help_text[y], strlen(help_text[y]));
         abAppend(&ab, "\r\n", 2);
     }
+
+    // Add a prompt to press any key to continue
+    const char *prompt = "Press any key to continue...";
+    int padding = (E.screencols - strlen(prompt)) / 2;
+    for (int i = 0; i < padding; i++) abAppend(&ab, " ", 1);
+    abAppend(&ab, prompt, strlen(prompt));
 
     write(STDOUT_FILENO, ab.b, ab.len);
     abFree(&ab);
 
-    while (1) {
-        int c = editorReadKey();
-        if (c == '\x1b' || c == 'q' || c == CTRL_KEY('g')) {
-            break;
-        }
-    }
+    // Wait for a keypress before returning to the editor
+    editorReadKey();
 }
 
 
 /* init */
 
 /**
- * @brief Initializes the global state of the editor.
+ * @brief Initializes the editor state.
  */
 void initEditor() {
-  E.cx = 0; E.cy = 0; E.rx = 0;
-  E.rowoff = 0; E.coloff = 0;
-  E.numrows = 0; E.row = NULL;
+  E.cx = 0;
+  E.cy = 0;
+  E.rx = 0;
+  E.rowoff = 0;
+  E.coloff = 0;
+  E.numrows = 0;
+  E.row = NULL;
   E.filename = NULL;
   E.statusmsg[0] = '\0';
   E.statusmsg_time = 0;
   E.dirty = 0;
-  E.linenumbers = 0;
+  E.linenumbers = 1;
   E.clipboard = NULL;
   E.clipboard_len = 0;
   E.hl_row = -1;
@@ -2198,7 +2351,7 @@ void initEditor() {
   E.selection_end_cx = -1;
   E.selection_end_cy = -1;
   E.selection_active = 0;
-  E.mode = NORMAL_MODE; // Initialize to normal mode
+  E.mode = NORMAL_MODE;
 
   if (getWindowSize(&E.screenrows, &E.screencols) == -1) die("getWindowSize");
   E.screenrows -= 2;
@@ -2206,18 +2359,19 @@ void initEditor() {
 
 /**
  * @brief Main function of the program.
- * @param argc Number of command line arguments.
- * @param argv Vector of command line argument strings.
- * @return 0 on success.
+ * @param argc Number of command-line arguments.
+ * @param argv Array of command-line arguments.
+ * @return 0 on success, 1 on error.
  */
 int main(int argc, char *argv[]) {
   enableRawMode();
   initEditor();
   if (argc >= 2) {
     editorOpen(argv[1]);
+  } else {
+    editorSetStatusMessage("HELP: Ctrl-G = show help | Ctrl-S = save | Ctrl-Q = quit | Ctrl-O = open file");
   }
-  editorSetStatusMessage(
-      "HELP: Ctrl-S Save | Ctrl-Q Quit | Ctrl-F Find | Ctrl-G Help");
+
   while (1) {
     editorRefreshScreen();
     editorProcessKeypress();
