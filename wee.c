@@ -40,8 +40,7 @@ enum editorKey {
   PAGE_UP,
   PAGE_DOWN,
   ALT_B,
-  ALT_E,
-  CTRL_ALT_SPACE // New enum value
+  ALT_E
 };
 
 enum editorHighlight {
@@ -140,8 +139,6 @@ void editorIndentSelection();
 void editorUnindentSelection();
 void editorMoveSelection(int key);
 void editorJumpToLine();
-void editorInsertEmptyLine();
-void editorDeleteEmptyLineBelow();
 
 
 /* terminal */
@@ -230,13 +227,6 @@ int editorReadKey() {
         case 'H': return HOME_KEY;
         case 'F': return END_KEY;
       }
-    } else if (seq[0] == '\x1b') { // This means we got ESC ESC
-      if (read(STDIN_FILENO, &seq[1], 1) != 1) return '\x1b'; // Read char after ESC ESC
-      if (seq[1] == ' ') { // If it's a space, then it's Ctrl+Alt+Space
-        return CTRL_ALT_SPACE;
-      }
-      // If it's ESC ESC but not followed by space, it's just ESC ESC, return ESC
-      return '\x1b';
     } else {
         if (seq[0] == 'b') return ALT_B;
         if (seq[0] == 'e') return ALT_E;
@@ -914,8 +904,7 @@ void editorCutLine() {
   if (E.cy >= E.numrows && E.numrows > 0) {
     E.cy = E.numrows - 1;
     E.cx = E.row[E.cy].size;
-  }
-  else if (E.numrows == 0) {
+  } else if (E.numrows == 0) {
     E.cy = 0;
     E.cx = 0;
   }
@@ -936,18 +925,32 @@ void editorPaste() {
 
   // If there's an active selection, delete it first
   if (E.selection_active) {
-    editorDelCharSelection();
+    editorDelCharSelection(); // This also deactivates selection
   }
+
+  // Store the starting position of the paste
+  int paste_start_cx = E.cx;
+  int paste_start_cy = E.cy;
 
   // Insert clipboard content
   for (int i = 0; i < E.clipboard_len; i++) {
     if (E.clipboard[i] == '\n') {
-      editorInsertRawNewline(); // Use raw newline insertion
+      editorInsertRawNewline();
     } else {
       editorInsertChar(E.clipboard[i]);
     }
   }
-  editorSetStatusMessage("Pasted.");
+
+  // The cursor (E.cx, E.cy) is now at the end of the pasted text.
+  // Set up the new selection.
+  E.selection_start_cx = paste_start_cx;
+  E.selection_start_cy = paste_start_cy;
+  E.selection_end_cx = E.cx;
+  E.selection_end_cy = E.cy;
+  E.selection_active = 1;
+  E.mode = SELECTION_MODE;
+
+  editorSetStatusMessage("Pasted and selected.");
 }
 
 /**
@@ -1448,7 +1451,7 @@ void editorDrawRows(struct abuf *ab) {
       } else {
         abAppend(ab, "~", 1);
       }
-    }
+    } 
     else {
       if (E.linenumbers) {
         char linenum_buf[16];
@@ -1843,8 +1846,6 @@ void editorProcessKeypress() {
       case CTRL_KEY('g'): editorShowHelp(); break;
       case CTRL_KEY('f'): editorFind(); break;
       case CTRL_KEY('j'): editorJumpToLine(); break;
-      case CTRL_KEY(' '): editorInsertEmptyLine(); break; // Ctrl+Space
-      case CTRL_ALT_SPACE: editorDeleteEmptyLineBelow(); break; // Ctrl+Alt+Space
       case HOME_KEY:
       case ALT_B:
         E.cx = 0;
@@ -2009,29 +2010,49 @@ void editorMoveSelection(int key) {
 
   switch (key) {
     case ARROW_LEFT: {
-      for (int i = start_cy; i <= end_cy; i++) {
-        erow *row = &E.row[i];
-        if (row->size > 0 && row->chars[0] == ' ') {
-          editorRowDelChar(row, 0);
-          if (i == E.selection_start_cy) {
-            if (E.selection_start_cx > 0) E.selection_start_cx--;
-          }
-          if (i == E.selection_end_cy) {
-            if (E.selection_end_cx > 0) E.selection_end_cx--;
+      if (start_cy != end_cy) { // Only handle multi-line as indentation
+        int can_unindent = 1;
+        for (int i = start_cy; i <= end_cy; i++) {
+          if (E.row[i].size == 0 || E.row[i].chars[0] != ' ') {
+            can_unindent = 0;
+            break;
           }
         }
+        if (can_unindent) {
+          for (int i = start_cy; i <= end_cy; i++) {
+            editorRowDelChar(&E.row[i], 0);
+          }
+          if (E.selection_start_cx > 0) E.selection_start_cx--;
+          if (E.selection_end_cx > 0) E.selection_end_cx--;
+          E.dirty++;
+        } else {
+          editorSetStatusMessage("Cannot un-indent further.");
+        }
+      } else { // Single-line selection
+        erow *row = &E.row[start_cy];
+        if (start_cx > 0 && row->chars[start_cx - 1] == ' ') {
+          editorRowDelChar(row, start_cx - 1);
+          E.selection_start_cx--;
+          E.selection_end_cx--;
+          E.dirty++;
+        }
       }
-      E.dirty++;
       break;
     }
     case ARROW_RIGHT: {
-      for (int i = start_cy; i <= end_cy; i++) {
-        erow *row = &E.row[i];
-        editorRowInsertChar(row, 0, ' ');
+      if (start_cy != end_cy) { // Only handle multi-line as indentation
+        for (int i = start_cy; i <= end_cy; i++) {
+          editorRowInsertChar(&E.row[i], 0, ' ');
+        }
+        E.selection_start_cx++;
+        E.selection_end_cx++;
+        E.dirty++;
+      } else { // Single-line selection
+        editorRowInsertChar(&E.row[start_cy], start_cx, ' ');
+        E.selection_start_cx++;
+        E.selection_end_cx++;
+        E.dirty++;
       }
-      E.selection_start_cx++;
-      E.selection_end_cx++;
-      E.dirty++;
       break;
     }
     case ARROW_UP: {
@@ -2121,33 +2142,6 @@ void editorJumpToLine() {
   // Ensure cursor is visible
   editorScroll();
   editorSetStatusMessage("Jumped to line %d.", target_line);
-}
-
-// Function to insert an empty line below the current cursor position
-void editorInsertEmptyLine() {
-  // Insert a new row below the current line
-  editorInsertRow(E.cy + 1, "", 0);
-  // The cursor remains in its original position
-  editorSetStatusMessage("Empty line inserted.");
-}
-
-// Function to delete the line below the cursor, only if it's empty
-void editorDeleteEmptyLineBelow() {
-  // Check if there's a line below the cursor
-  if (E.cy + 1 >= E.numrows) {
-    editorSetStatusMessage("No line below to delete.");
-    return;
-  }
-
-  erow *line_below = &E.row[E.cy + 1];
-
-  // Check if the line below is empty
-  if (line_below->size == 0) {
-    editorDelRow(E.cy + 1);
-    editorSetStatusMessage("Empty line deleted.");
-  } else {
-    editorSetStatusMessage("Line below is not empty. Cannot delete.");
-  }
 }
 
 
@@ -2316,9 +2310,6 @@ void editorShowHelp() {
         "",
         "Ctrl-J: Jump to Line",
         "",
-        "Ctrl-Space: Insert Empty Line Below", // Added
-        "Ctrl-Alt-Space: Delete Empty Line Below (if empty)", // Added
-        "", // Added for spacing
         "Ctrl-B: Start Selection",
         "Ctrl-E: End Selection & Enter Selection Mode",
         "Ctrl-A: Select All",
