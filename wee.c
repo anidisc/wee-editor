@@ -42,7 +42,11 @@ enum editorKey {
   PAGE_DOWN,
   ALT_B,
   ALT_E,
-  ALT_R
+  ALT_R,
+  SHIFT_UP,
+  SHIFT_DOWN,
+  SHIFT_LEFT,
+  SHIFT_RIGHT
 };
 
 enum editorHighlight {
@@ -178,6 +182,7 @@ void editorUpdateSyntax(erow *row);
 void editorSelectSyntaxHighlight();
 void editorFreeSyntax();
 void editorUpdateSelectionSyntax();
+void editorDeselectSelection();
 void editorIndentSelection();
 void editorUnindentSelection();
 void editorMoveSelection(int key);
@@ -194,6 +199,8 @@ void editorClearUndoSystem();
 struct EditorSnapshot* editorCopyCurrentState(const char *description);
 void editorRestoreSnapshot(struct EditorSnapshot *snap);
 void editorSelectRowText();
+void editorQuickSelectFullLine(int direction);
+void editorQuickSelectChar(int direction);
 void abAppend(struct abuf *ab, const char *s, int len);
 
 
@@ -265,6 +272,19 @@ int editorReadKey() {
             case '6': return PAGE_DOWN;
             case '7': return HOME_KEY;
             case '8': return END_KEY;
+          }
+        } else if (seq[1] == '1' && seq[2] == ';') {
+          // Sequenze modificatori come Shift+frecce: ESC[1;2X
+          char seq3[2];
+          if (read(STDIN_FILENO, &seq3[0], 1) != 1) return '\x1b';
+          if (read(STDIN_FILENO, &seq3[1], 1) != 1) return '\x1b';
+          if (seq3[0] == '2') { // Shift modifier
+            switch (seq3[1]) {
+              case 'A': return SHIFT_UP;
+              case 'B': return SHIFT_DOWN;
+              case 'C': return SHIFT_RIGHT;
+              case 'D': return SHIFT_LEFT;
+            }
           }
         }
       } else {
@@ -859,22 +879,8 @@ void editorCopySelection() {
     E.clipboard_len += len_last_line;
     E.clipboard[E.clipboard_len] = '\0'; // No newline after the last line
   }
-  E.selection_active = 0; // Deselect after copy
-
-  // Explicitly reset HL_SELECTION for affected rows
-  // int start_cy = E.selection_start_cy;
-  // int end_cy = E.selection_end_cy;
-
-  // Ensure start is before end for iteration
-  if (start_cy > end_cy) {
-    int temp_cy = start_cy;
-    start_cy = end_cy;
-    end_cy = temp_cy;
-  }
-
-  for (int i = start_cy; i <= end_cy; i++) {
-    editorUpdateSyntax(&E.row[i]); // Re-evaluate syntax highlighting for the row
-  }
+  editorDeselectSelection(); // Deselect after copy and update highlighting
+  editorRefreshScreen(); // Force immediate visual update
 
   editorSetStatusMessage("Selection copied.");
 }
@@ -1230,6 +1236,16 @@ void editorUpdateSelectionSyntax() {
   }
 }
 
+/**
+ * @brief Deselects the current selection and updates visual highlighting
+ */
+void editorDeselectSelection() {
+  if (E.selection_active) {
+    editorUpdateSelectionSyntax();
+    E.selection_active = 0;
+  }
+}
+
 void editorSelectSyntaxHighlight() {
   E.syntax = NULL;
   if (E.filename == NULL) return;
@@ -1335,7 +1351,7 @@ void editorFindCallback(char *query, int key) {
   if (key == '\r' || key == '\x1b') {
     last_match = -1;
     direction = 1;
-    E.selection_active = 0;
+    editorDeselectSelection();
     return;
   } else if (key == ARROW_RIGHT || key == ARROW_DOWN) {
     direction = 1;
@@ -1378,7 +1394,7 @@ void editorFindCallback(char *query, int key) {
 
   // If no match was found from this action, deactivate selection
   if (!found) {
-      E.selection_active = 0;
+      editorDeselectSelection();
       last_match = -1;
   }
 }
@@ -1397,7 +1413,7 @@ void editorFind() {
     E.coloff = saved_coloff; E.rowoff = saved_rowoff;
   }
   // Ensure selection is cleared and screen is refreshed when prompt is closed
-  E.selection_active = 0;
+  editorDeselectSelection();
   editorRefreshScreen();
 }
 
@@ -1578,7 +1594,7 @@ void editorDrawRows(struct abuf *ab) {
 
           for (int j = 0; j < len; j++) {
             int current_render_idx = E.coloff + j; // This is the render index of the character being drawn
-            // Apply selection highlighting
+            // Apply selection highlighting only if selection is still active
             if (sel_start_rx != -1) { // Only highlight if this row is part of the selection
                 // Special case for single character selection
                 if (local_sel_start_cy == local_sel_end_cy && local_sel_start_cx == local_sel_end_cx) {
@@ -1826,10 +1842,10 @@ void editorProcessKeypress() {
   if (E.mode == SELECTION_MODE) {
     switch (c) {
       case '\x1b': // ESC - Cancel selection
-        editorUpdateSelectionSyntax(); // Update syntax highlighting to remove selection
-        E.selection_active = 0;
+        editorDeselectSelection();
         E.mode = NORMAL_MODE;
         editorSetStatusMessage("Selection cancelled.");
+        editorRefreshScreen();
         break;
       case '\t':
         editorIndentSelection();
@@ -1961,6 +1977,18 @@ void editorProcessKeypress() {
       case ARROW_RIGHT:
         editorMoveCursor(c);
         break;
+      case SHIFT_UP:
+        editorQuickSelectFullLine(-1);
+        break;
+      case SHIFT_DOWN:
+        editorQuickSelectFullLine(1);
+        break;
+      case SHIFT_LEFT:
+        editorQuickSelectChar(-1);
+        break;
+      case SHIFT_RIGHT:
+        editorQuickSelectChar(1);
+        break;
       case CTRL_KEY('o'): {
         char *path = editorFileBrowser(".");
         if (path) {
@@ -1970,8 +1998,14 @@ void editorProcessKeypress() {
         break;
       }
       case CTRL_KEY('l'):
-      case '\x1b':
-        // This is now handled in SELECTION_MODE
+        break;
+      case '\x1b': // ESC key
+        if (E.selection_active) {
+          // Se c'è una selezione attiva, entra in SELECTION_MODE
+          E.mode = SELECTION_MODE;
+          editorSetStatusMessage("Entered SELECTION_MODE. Selection ready for operations.");
+        }
+        // Se non c'è selezione attiva, ESC non fa nulla in NORMAL_MODE
         break;
       case CTRL_KEY('b'):
         E.selection_start_cx = E.cx;
@@ -2293,21 +2327,6 @@ int editorCanMoveSelectionVertical() {
 }
 
 void editorMoveSelection(int key) {
-  // Get current selection bounds and normalize them
-  int start_cx = E.selection_start_cx;
-  int start_cy = E.selection_start_cy;
-  int end_cx = E.selection_end_cx;
-  int end_cy = E.selection_end_cy;
-
-  if (start_cy > end_cy || (start_cy == end_cy && start_cx > end_cx)) {
-    int temp_cx = start_cx;
-    int temp_cy = start_cy;
-    start_cx = end_cx;
-    start_cy = end_cy;
-    end_cx = temp_cx;
-    end_cy = temp_cy;
-  }
-
   switch (key) {
     case ARROW_LEFT: {
         if (!editorCanMoveSelectionLeft()) {
@@ -2332,15 +2351,25 @@ void editorMoveSelection(int key) {
           editorSetStatusMessage("Cannot move selection up - selection must be full lines");
           return;
       }
-      if (start_cy == 0) {
+      
+      // Get normalized coordinates for bounds checking
+      int norm_start_cy = E.selection_start_cy;
+      int norm_end_cy = E.selection_end_cy;
+      if (norm_start_cy > norm_end_cy) {
+          int temp = norm_start_cy;
+          norm_start_cy = norm_end_cy;
+          norm_end_cy = temp;
+      }
+      
+      if (norm_start_cy == 0) {
           editorSetStatusMessage("Cannot move selection up - already at top");
           return;
       }
       
-      // Additional safety checks
-      if (end_cy >= E.numrows || start_cy < 0) return;
+      // Safety checks
+      if (norm_end_cy >= E.numrows || norm_start_cy < 0) return;
 
-      int sel_height = end_cy - start_cy + 1;
+      int sel_height = norm_end_cy - norm_start_cy + 1;
 
       // Store selection temporarily
       erow *temp_selected_block = malloc(sizeof(erow) * sel_height);
@@ -2350,28 +2379,31 @@ void editorMoveSelection(int key) {
       }
       
       for (int i = 0; i < sel_height; i++) {
-        temp_selected_block[i] = E.row[start_cy + i];
+        temp_selected_block[i] = E.row[norm_start_cy + i];
       }
 
       // Move the line above the selection to where the selection ends
-      E.row[end_cy] = E.row[start_cy - 1];
+      E.row[norm_end_cy] = E.row[norm_start_cy - 1];
 
       // Move the selection up one position
       for (int i = 0; i < sel_height; i++) {
-        E.row[start_cy - 1 + i] = temp_selected_block[i];
+        E.row[norm_start_cy - 1 + i] = temp_selected_block[i];
       }
       
       free(temp_selected_block);
 
       // Update row indices and rendering
-      for (int i = start_cy - 1; i <= end_cy; i++) {
+      for (int i = norm_start_cy - 1; i <= norm_end_cy; i++) {
         E.row[i].idx = i;
         editorUpdateRow(&E.row[i]);
       }
 
-      // Update selection coordinates
+      // Update BOTH anchor and cursor coordinates (they both move up by 1)
       E.selection_start_cy--;
       E.selection_end_cy--;
+
+      // Move the actual cursor up too
+      if (E.cy > 0) E.cy--;
 
       E.dirty++;
       editorSetStatusMessage("Selection moved up");
@@ -2382,15 +2414,25 @@ void editorMoveSelection(int key) {
           editorSetStatusMessage("Cannot move selection down - selection must be full lines");
           return;
       }
-      if (end_cy >= E.numrows - 1) {
+      
+      // Get normalized coordinates for bounds checking
+      int norm_start_cy = E.selection_start_cy;
+      int norm_end_cy = E.selection_end_cy;
+      if (norm_start_cy > norm_end_cy) {
+          int temp = norm_start_cy;
+          norm_start_cy = norm_end_cy;
+          norm_end_cy = temp;
+      }
+      
+      if (norm_end_cy >= E.numrows - 1) {
           editorSetStatusMessage("Cannot move selection down - already at bottom");
           return;
       }
       
-      // Additional safety checks
-      if (start_cy < 0 || end_cy + 1 >= E.numrows) return;
+      // Safety checks
+      if (norm_start_cy < 0 || norm_end_cy + 1 >= E.numrows) return;
 
-      int sel_height = end_cy - start_cy + 1;
+      int sel_height = norm_end_cy - norm_start_cy + 1;
 
       // Store selection temporarily
       erow *temp_selected_block = malloc(sizeof(erow) * sel_height);
@@ -2400,28 +2442,31 @@ void editorMoveSelection(int key) {
       }
       
       for (int i = 0; i < sel_height; i++) {
-        temp_selected_block[i] = E.row[start_cy + i];
+        temp_selected_block[i] = E.row[norm_start_cy + i];
       }
 
       // Move the line below the selection to where the selection starts
-      E.row[start_cy] = E.row[end_cy + 1];
+      E.row[norm_start_cy] = E.row[norm_end_cy + 1];
 
       // Move the selection down one position
       for (int i = 0; i < sel_height; i++) {
-        E.row[start_cy + 1 + i] = temp_selected_block[i];
+        E.row[norm_start_cy + 1 + i] = temp_selected_block[i];
       }
       
       free(temp_selected_block);
 
       // Update row indices and rendering
-      for (int i = start_cy; i <= end_cy + 1; i++) {
+      for (int i = norm_start_cy; i <= norm_end_cy + 1; i++) {
         E.row[i].idx = i;
         editorUpdateRow(&E.row[i]);
       }
 
-      // Update selection coordinates
+      // Update BOTH anchor and cursor coordinates (they both move down by 1)
       E.selection_start_cy++;
       E.selection_end_cy++;
+
+      // Move the actual cursor down too
+      if (E.cy < E.numrows - 1) E.cy++;
 
       E.dirty++;
       editorSetStatusMessage("Selection moved down");
@@ -2715,6 +2760,152 @@ void editorSelectRowText() {
     E.cx = start_cx;
     
     editorSetStatusMessage("Row text selected (chars %d-%d)", start_cx, end_cx - 1);
+}
+
+/**
+ * @brief Simplified line selection for Shift+Up/Down
+ *        Uses anchor-cursor model: anchor line stays fixed, cursor line moves
+ * @param direction -1 for up, +1 for down
+ */
+void editorQuickSelectFullLine(int direction) {
+    if (E.cy >= E.numrows) {
+        editorSetStatusMessage("No line to select");
+        return;
+    }
+    
+    // If no selection is active, set anchor to current line
+    if (!E.selection_active) {
+        // Set anchor line (selection_start) to current line - FULL LINE
+        E.selection_start_cx = 0;                    // Start of line
+        E.selection_start_cy = E.cy;                 // Current line becomes anchor
+        E.selection_end_cx = E.row[E.cy].size;       // End of line
+        E.selection_end_cy = E.cy;                   // Current line (will be our moving cursor)
+        E.selection_active = 1;
+    }
+    
+    // Move cursor line in the specified direction
+    if (direction == -1) { // Up
+        if (E.cy > 0) {
+            E.cy--;
+            E.cx = 0;  // Move to start of line
+        } else {
+            editorSetStatusMessage("Cannot move up - at beginning of file");
+            return;
+        }
+    } else { // Down
+        if (E.cy < E.numrows - 1) {
+            E.cy++;
+            E.cx = 0;  // Move to start of line
+        } else {
+            editorSetStatusMessage("Cannot move down - at end of file");
+            return;
+        }
+    }
+    
+    // Update selection end to new cursor line - FULL LINE
+    E.selection_end_cx = E.row[E.cy].size;  // End of new line
+    E.selection_end_cy = E.cy;              // New line
+    
+    // Check if anchor and cursor are on the same line (empty selection)
+    if (E.selection_start_cy == E.selection_end_cy) {
+        editorDeselectSelection();
+        E.mode = NORMAL_MODE;
+        editorSetStatusMessage("Selection cleared");
+        return;
+    }
+    
+    // Show selection info (normalize for display only)
+    int start_line = E.selection_start_cy;
+    int end_line = E.selection_end_cy;
+    
+    if (start_line > end_line) {
+        int temp = start_line;
+        start_line = end_line;
+        end_line = temp;
+    }
+    
+    editorSetStatusMessage("Selected: lines %d-%d", start_line + 1, end_line + 1);
+}
+
+/**
+ * @brief Simplified character selection for Shift+Left/Right
+ *        Uses anchor-cursor model: anchor stays fixed, cursor moves
+ * @param direction -1 for left, +1 for right
+ */
+void editorQuickSelectChar(int direction) {
+    if (E.cy >= E.numrows) {
+        editorSetStatusMessage("No text to select");
+        return;
+    }
+    
+    // If no selection is active, set anchor to current cursor position
+    if (!E.selection_active) {
+        E.selection_start_cx = E.cx;  // This becomes our anchor
+        E.selection_start_cy = E.cy;
+        E.selection_end_cx = E.cx;    // This will be our moving cursor
+        E.selection_end_cy = E.cy;
+        E.selection_active = 1;
+    }
+    
+    // Move the cursor (selection end point) in the specified direction
+    if (direction == -1) { // Left
+        if (E.cx > 0) {
+            E.cx--;
+        } else if (E.cy > 0) {
+            E.cy--;
+            E.cx = E.row[E.cy].size;
+        } else {
+            editorSetStatusMessage("Cannot move left - at beginning of file");
+            return;
+        }
+    } else { // Right
+        // Get current row size AFTER potential line change
+        erow *current_row = &E.row[E.cy];
+        if (E.cx < current_row->size) {
+            E.cx++;
+        } else if (E.cy < E.numrows - 1) {
+            E.cy++;
+            E.cx = 0;
+        } else {
+            editorSetStatusMessage("Cannot move right - at end of file");
+            return;
+        }
+    }
+    
+    // Update the selection end to the new cursor position
+    E.selection_end_cx = E.cx;
+    E.selection_end_cy = E.cy;
+    
+    // Check if anchor and cursor are at the same position (empty selection)
+    if (E.selection_start_cy == E.selection_end_cy && 
+        E.selection_start_cx == E.selection_end_cx) {
+        editorDeselectSelection();
+        E.mode = NORMAL_MODE;
+        editorSetStatusMessage("Selection cleared");
+        return;
+    }
+    
+    // Show selection info
+    int start_cx = E.selection_start_cx;
+    int start_cy = E.selection_start_cy;
+    int end_cx = E.selection_end_cx;
+    int end_cy = E.selection_end_cy;
+    
+    // Normalize for display (but don't change the actual values)
+    if (start_cy > end_cy || (start_cy == end_cy && start_cx > end_cx)) {
+        int temp_cx = start_cx;
+        int temp_cy = start_cy;
+        start_cx = end_cx;
+        start_cy = end_cy;
+        end_cx = temp_cx;
+        end_cy = temp_cy;
+    }
+    
+    if (start_cy == end_cy) {
+        editorSetStatusMessage("Selected: line %d, chars %d-%d", start_cy + 1, start_cx + 1, end_cx);
+    } else {
+        editorSetStatusMessage("Selected: lines %d-%d", start_cy + 1, end_cy + 1);
+    }
 }
 
 

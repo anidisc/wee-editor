@@ -5,7 +5,7 @@
     "switch", "if", "while", "for", "break", "continue", "return", "else",
     "struct", "union", "typedef", "static", "enum", "class", "case",
     "int|", "long|", "double|", "float|", "char|", "unsigned|", "signed|",
-    "void|"
+    "void|", "#define|", "#include"
   ],
   "singleline_comment_start": "//",
   "multiline_comment_start": "/*",
