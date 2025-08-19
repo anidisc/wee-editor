@@ -62,15 +62,52 @@ enum editorHighlight {
 /* data */
 
 enum command_type {
+    CMD_INSERT_CHAR,
+    CMD_DELETE_CHAR,
+    CMD_INSERT_LINE,
+    CMD_DELETE_LINE,
+    CMD_REPLACE_TEXT,
+    CMD_MOVE_LINES,
     CMD_INSERT,
-    CMD_DELETE
+    CMD_DELETE,
+    CMD_BEGIN_MACRO,
+    CMD_END_MACRO,
+    CMD_REPLACE_LINES
 };
 
+/* Structure to represent a single line of text for undo/redo */
+struct saved_line {
+    char *chars;
+    int size;
+};
+
+/* Main command structure for undo/redo system */
 struct editorCommand {
     enum command_type type;
-    int cy, cx;
+    int cy, cx;  /* cursor position when command was executed */
+    
+    /* For character operations */
     char *text;
     int text_len;
+    
+    /* For line operations */
+    int line_start;
+    int line_count;
+    struct saved_line *lines;
+    
+    /* For text replacement operations */
+    struct saved_line *old_lines;
+    struct saved_line *new_lines;
+    int old_line_count;
+    int new_line_count;
+    
+    /* For CMD_REPLACE_LINES operations */
+    int start_line;
+    int num_lines;
+    char **lines_before;
+    int *lines_before_len;
+    char **lines_after;
+    int *lines_after_len;
 };
 
 struct editorSyntax {
@@ -133,6 +170,13 @@ enum editorMode {
 
 /* append buffer */
 
+struct abuf {
+  char *b;
+  int len;
+};
+
+#define ABUF_INIT {NULL, 0}
+
 struct editorConfig E;
 
 /* prototypes */
@@ -162,6 +206,7 @@ void editorPushUndoCommand(enum command_type type, int cy, int cx, const char *t
 void editorFreeCommand(struct editorCommand *cmd);
 void editorClearUndoStack();
 void editorClearRedoStack();
+void abAppend(struct abuf *ab, const char *s, int len);
 
 
 /* terminal */
@@ -460,7 +505,7 @@ void editorInsertChar(int c) {
   }
   editorRowInsertChar(&E.row[E.cy], E.cx, c);
   char text[2] = { (char)c, '\0' };
-  editorPushUndoCommand(CMD_INSERT, E.cy, E.cx, text, 1);
+  editorPushUndoCommand(CMD_INSERT_CHAR, E.cy, E.cx, text, 1);
   E.cx++;
   char closing_char = 0;
   switch (c) {
@@ -480,7 +525,7 @@ void editorInsertChar(int c) {
  *        Maintains the indentation of the current line on the new line.
  */
 void editorInsertNewline() {
-  editorPushUndoCommand(CMD_INSERT, E.cy, E.cx, "\n", 1);
+  editorPushUndoCommand(CMD_INSERT_LINE, E.cy, E.cx, "\n", 1);
   if (E.cx == 0) {
     editorInsertRow(E.cy, "", 0);
   } else {
@@ -1109,7 +1154,7 @@ void editorUpdateSyntax(erow *row) {
         prev_sep = 1;
         continue;
       } else {
-        if (c == '"' || c == '\'\'") {
+        if (c == '"' || c == '\'') {
           in_string = c;
           row->hl[i] = HL_STRING;
           i++;
@@ -2034,6 +2079,55 @@ void editorUnindentSelection() {
   E.dirty++;
 }
 
+void editorMoveSelectionLeft() {
+  if (!E.selection_active) return;
+  int start_cy = E.selection_start_cy;
+  int end_cy = E.selection_end_cy;
+
+  if (start_cy > end_cy) {
+    int temp = start_cy;
+    start_cy = end_cy;
+    end_cy = temp;
+  }
+
+  for (int i = start_cy; i <= end_cy; i++) {
+    erow *row = &E.row[i];
+    if (row->size > 0 && row->chars[0] == ' ') {
+      editorRowDelChar(row, 0);
+      if (i == E.selection_start_cy) {
+        E.selection_start_cx--;
+        if (E.selection_start_cx < 0) E.selection_start_cx = 0;
+      }
+      if (i == E.selection_end_cy) {
+        E.selection_end_cx--;
+        if (E.selection_end_cx < 0) E.selection_end_cx = 0;
+      }
+    }
+  }
+  E.dirty++;
+}
+
+void editorMoveSelectionRight() {
+  if (!E.selection_active) return;
+  int start_cy = E.selection_start_cy;
+  int end_cy = E.selection_end_cy;
+
+  if (start_cy > end_cy) {
+    int temp = start_cy;
+    start_cy = end_cy;
+    end_cy = temp;
+  }
+
+  for (int i = start_cy; i <= end_cy; i++) {
+    erow *row = &E.row[i];
+    editorRowInsertChar(row, 0, ' ');
+  }
+
+  E.selection_start_cx++;
+  E.selection_end_cx++;
+  E.dirty++;
+}
+
 void editorMoveSelection(int key) {
   // Get current selection bounds and normalize them
   int start_cx = E.selection_start_cx;
@@ -2052,145 +2146,99 @@ void editorMoveSelection(int key) {
 
   switch (key) {
     case ARROW_LEFT: {
-        editorClearUndoStack();
-        editorClearRedoStack();
-        editorSetStatusMessage("Undo history cleared after move");
+        editorMoveSelectionLeft();
+        editorSetStatusMessage("Selection moved left");
       break;
     }
     case ARROW_RIGHT: {
-        editorClearUndoStack();
-        editorClearRedoStack();
-        editorSetStatusMessage("Undo history cleared after move");
+        editorMoveSelectionRight();
+        editorSetStatusMessage("Selection moved right");
       break;
     }
     case ARROW_UP: {
       if (start_cy == 0) return;
+      
+      // Additional safety checks
+      if (end_cy >= E.numrows || start_cy < 0) return;
 
       int sel_height = end_cy - start_cy + 1;
-      int num_affected_lines = sel_height + 1;
-      int first_affected_line = start_cy - 1;
 
-      char **lines_before = malloc(sizeof(char *) * num_affected_lines);
-      int *lines_before_len = malloc(sizeof(int) * num_affected_lines);
-
-      for (int i = 0; i < num_affected_lines; i++) {
-          erow *row = &E.row[first_affected_line + i];
-          lines_before[i] = malloc(row->size + 1);
-          memcpy(lines_before[i], row->chars, row->size);
-          lines_before[i][row->size] = '\0';
-          lines_before_len[i] = row->size;
+      // Store selection temporarily
+      erow *temp_selected_block = malloc(sizeof(erow) * sel_height);
+      if (!temp_selected_block) {
+        editorSetStatusMessage("Memory allocation failed");
+        return;
       }
-
-      erow temp_selected_block[sel_height];
+      
       for (int i = 0; i < sel_height; i++) {
         temp_selected_block[i] = E.row[start_cy + i];
       }
 
+      // Move the line above the selection to where the selection ends
       E.row[end_cy] = E.row[start_cy - 1];
 
+      // Move the selection up one position
       for (int i = 0; i < sel_height; i++) {
         E.row[start_cy - 1 + i] = temp_selected_block[i];
       }
+      
+      free(temp_selected_block);
 
-      for (int i = first_affected_line; i <= end_cy; i++) {
+      // Update row indices and rendering
+      for (int i = start_cy - 1; i <= end_cy; i++) {
         E.row[i].idx = i;
         editorUpdateRow(&E.row[i]);
       }
 
-      char **lines_after = malloc(sizeof(char *) * num_affected_lines);
-      int *lines_after_len = malloc(sizeof(int) * num_affected_lines);
-
-      for (int i = 0; i < num_affected_lines; i++) {
-          erow *row = &E.row[first_affected_line + i];
-          lines_after[i] = malloc(row->size + 1);
-          memcpy(lines_after[i], row->chars, row->size);
-          lines_after[i][row->size] = '\0';
-          lines_after_len[i] = row->size;
-      }
-
-      struct editorCommand *cmd = malloc(sizeof(struct editorCommand));
-      cmd->type = CMD_REPLACE_LINES;
-      cmd->start_line = first_affected_line;
-      cmd->num_lines = num_affected_lines;
-      cmd->lines_before = lines_before;
-      cmd->lines_before_len = lines_before_len;
-      cmd->lines_after = lines_after;
-      cmd->lines_after_len = lines_after_len;
-      cmd->text = NULL;
-      cmd->text_len = 0;
-
-      E.undo_stack[E.undo_stack_top++] = cmd;
-      editorClearRedoStack();
-
+      // Update selection coordinates
       E.selection_start_cy--;
       E.selection_end_cy--;
 
       E.dirty++;
+      editorSetStatusMessage("Selection moved up");
       break;
     }
     case ARROW_DOWN: {
-      if (end_cy == E.numrows - 1) return;
+      if (end_cy >= E.numrows - 1) return;
+      
+      // Additional safety checks
+      if (start_cy < 0 || end_cy + 1 >= E.numrows) return;
 
       int sel_height = end_cy - start_cy + 1;
-      int num_affected_lines = sel_height + 1;
-      int first_affected_line = start_cy;
 
-      char **lines_before = malloc(sizeof(char *) * num_affected_lines);
-      int *lines_before_len = malloc(sizeof(int) * num_affected_lines);
-
-      for (int i = 0; i < num_affected_lines; i++) {
-          erow *row = &E.row[first_affected_line + i];
-          lines_before[i] = malloc(row->size + 1);
-          memcpy(lines_before[i], row->chars, row->size);
-          lines_before[i][row->size] = '\0';
-          lines_before_len[i] = row->size;
+      // Store selection temporarily
+      erow *temp_selected_block = malloc(sizeof(erow) * sel_height);
+      if (!temp_selected_block) {
+        editorSetStatusMessage("Memory allocation failed");
+        return;
       }
-
-      erow temp_selected_block[sel_height];
+      
       for (int i = 0; i < sel_height; i++) {
         temp_selected_block[i] = E.row[start_cy + i];
       }
 
+      // Move the line below the selection to where the selection starts
       E.row[start_cy] = E.row[end_cy + 1];
 
+      // Move the selection down one position
       for (int i = 0; i < sel_height; i++) {
         E.row[start_cy + 1 + i] = temp_selected_block[i];
       }
+      
+      free(temp_selected_block);
 
-      for (int i = first_affected_line; i <= end_cy + 1; i++) {
+      // Update row indices and rendering
+      for (int i = start_cy; i <= end_cy + 1; i++) {
         E.row[i].idx = i;
         editorUpdateRow(&E.row[i]);
       }
 
-      char **lines_after = malloc(sizeof(char *) * num_affected_lines);
-      int *lines_after_len = malloc(sizeof(int) * num_affected_lines);
-
-      for (int i = 0; i < num_affected_lines; i++) {
-          erow *row = &E.row[first_affected_line + i];
-          lines_after[i] = malloc(row->size + 1);
-          memcpy(lines_after[i], row->chars, row->size);
-          lines_after[i][row->size] = '\0';
-          lines_after_len[i] = row->size;
-      }
-
-      struct editorCommand *cmd = malloc(sizeof(struct editorCommand));
-      cmd->type = CMD_REPLACE_LINES;
-      cmd->start_line = first_affected_line;
-      cmd->num_lines = num_affected_lines;
-      cmd->lines_before = lines_before;
-      cmd->lines_before_len = lines_before_len;
-      cmd->lines_after = lines_after;
-      cmd->lines_after_len = lines_after_len;
-      cmd->text = NULL;
-      cmd->text_len = 0;
-
-      E.undo_stack[E.undo_stack_top++] = cmd;
-      editorClearRedoStack();
-
+      // Update selection coordinates
       E.selection_start_cy++;
       E.selection_end_cy++;
 
       E.dirty++;
+      editorSetStatusMessage("Selection moved down");
       break;
     }
   }
@@ -2278,37 +2326,50 @@ void editorUndo() {
 
     E.cy = cmd->cy;
     E.cx = cmd->cx;
-    if (cmd->type == CMD_INSERT) {
-        for (int i = 0; i < cmd->text_len; i++) {
-            if (cmd->text[i] == '\n') {
-                erow *row = &E.row[E.cy];
-                erow *next_row = &E.row[E.cy + 1];
-                E.cx = row->size;
-                editorRowAppendString(row, next_row->chars, next_row->size);
-                editorDelRow(E.cy + 1);
-            } else {
+    
+    switch (cmd->type) {
+        case CMD_INSERT_CHAR:
+            // Undo character insertion by deleting the character
+            if (E.cy < E.numrows) {
                 editorRowDelChar(&E.row[E.cy], E.cx);
             }
-        }
-    } else { // CMD_DELETE
-        for (int i = 0; i < cmd->text_len; i++) {
-            if (cmd->text[i] == '\n') {
-                erow *row = &E.row[E.cy];
-                if (E.cx == row->size) {
-                    editorInsertRow(E.cy + 1, "", 0);
-                } else {
-                    editorInsertRow(E.cy + 1, &row->chars[E.cx], row->size - E.cx);
-                    row->size = E.cx;
-                    editorUpdateRow(row);
-                }
-                E.cy++;
-                E.cx = 0;
-            } else {
-                editorRowInsertChar(&E.row[E.cy], E.cx, cmd->text[i]);
+            break;
+            
+        case CMD_DELETE_CHAR:
+            // Undo character deletion by inserting the character back
+            if (E.cy < E.numrows && cmd->text_len > 0) {
+                editorRowInsertChar(&E.row[E.cy], E.cx, cmd->text[0]);
                 E.cx++;
             }
-        }
+            break;
+            
+        case CMD_INSERT_LINE:
+            // Undo line insertion by removing the line
+            if (E.cy < E.numrows - 1) {
+                erow *current_row = &E.row[E.cy];
+                erow *next_row = &E.row[E.cy + 1];
+                // Join the lines
+                editorRowAppendString(current_row, next_row->chars, next_row->size);
+                editorDelRow(E.cy + 1);
+            }
+            break;
+            
+        case CMD_DELETE_LINE:
+            // Undo line deletion by inserting the line back
+            if (cmd->text_len > 0) {
+                char *line_content = malloc(cmd->text_len);
+                memcpy(line_content, cmd->text, cmd->text_len - 1); // Remove the newline
+                line_content[cmd->text_len - 1] = '\0';
+                editorInsertRow(E.cy, line_content, cmd->text_len - 1);
+                free(line_content);
+            }
+            break;
+            
+        default:
+            editorSetStatusMessage("Cannot undo: unsupported command type");
+            return;
     }
+    
     E.dirty++;
     editorSetStatusMessage("Undo");
 }
@@ -2324,37 +2385,54 @@ void editorRedo() {
 
     E.cy = cmd->cy;
     E.cx = cmd->cx;
-    if (cmd->type == CMD_INSERT) {
-        for (int i = 0; i < cmd->text_len; i++) {
-            if (cmd->text[i] == '\n') {
-                erow *row = &E.row[E.cy];
-                if (E.cx == row->size) {
-                    editorInsertRow(E.cy + 1, "", 0);
-                } else {
-                    editorInsertRow(E.cy + 1, &row->chars[E.cx], row->size - E.cx);
-                    row->size = E.cx;
-                    editorUpdateRow(row);
-                }
-                E.cy++;
-                E.cx = 0;
-            } else {
-                editorRowInsertChar(&E.row[E.cy], E.cx, cmd->text[i]);
+    
+    switch (cmd->type) {
+        case CMD_INSERT_CHAR:
+            // Redo character insertion by inserting the character again
+            if (E.cy < E.numrows && cmd->text_len > 0) {
+                editorRowInsertChar(&E.row[E.cy], E.cx, cmd->text[0]);
                 E.cx++;
             }
-        }
-    } else { // CMD_DELETE
-        for (int i = 0; i < cmd->text_len; i++) {
-            if (cmd->text[i] == '\n') {
-                erow *row = &E.row[E.cy];
-                erow *next_row = &E.row[E.cy + 1];
-                E.cx = row->size;
-                editorRowAppendString(row, next_row->chars, next_row->size);
-                editorDelRow(E.cy + 1);
-            } else {
+            break;
+            
+        case CMD_DELETE_CHAR:
+            // Redo character deletion by deleting the character again
+            if (E.cy < E.numrows && E.cx < E.row[E.cy].size) {
                 editorRowDelChar(&E.row[E.cy], E.cx);
             }
-        }
+            break;
+            
+        case CMD_INSERT_LINE:
+            // Redo line insertion by adding the line again
+            if (E.cx == 0) {
+                editorInsertRow(E.cy, "", 0);
+            } else if (E.cy < E.numrows) {
+                erow *row = &E.row[E.cy];
+                editorInsertRow(E.cy + 1, &row->chars[E.cx], row->size - E.cx);
+                row = &E.row[E.cy]; // Re-get pointer after realloc
+                row->size = E.cx;
+                editorUpdateRow(row);
+            }
+            E.cy++;
+            E.cx = 0;
+            break;
+            
+        case CMD_DELETE_LINE:
+            // Redo line deletion by deleting the line again
+            if (E.cy < E.numrows) {
+                editorDelRow(E.cy);
+                if (E.cy >= E.numrows && E.numrows > 0) {
+                    E.cy = E.numrows - 1;
+                    E.cx = E.row[E.cy].size;
+                }
+            }
+            break;
+            
+        default:
+            editorSetStatusMessage("Cannot redo: unsupported command type");
+            return;
     }
+    
     E.dirty++;
     editorSetStatusMessage("Redo");
 }
