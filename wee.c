@@ -199,6 +199,10 @@ void editorUpdateSelectionSyntax();
 void editorIndentSelection();
 void editorUnindentSelection();
 void editorMoveSelection(int key);
+int editorCanMoveSelectionLeft();
+int editorCanMoveSelectionRight();
+int editorIsSelectionFullLines();
+int editorCanMoveSelectionVertical();
 void editorJumpToLine();
 void editorUndo();
 void editorRedo();
@@ -2081,51 +2085,211 @@ void editorUnindentSelection() {
 
 void editorMoveSelectionLeft() {
   if (!E.selection_active) return;
+  
+  int start_cx = E.selection_start_cx;
   int start_cy = E.selection_start_cy;
+  int end_cx = E.selection_end_cx;
   int end_cy = E.selection_end_cy;
 
-  if (start_cy > end_cy) {
-    int temp = start_cy;
+  // Normalizza le coordinate
+  if (start_cy > end_cy || (start_cy == end_cy && start_cx > end_cx)) {
+    int temp_cx = start_cx;
+    int temp_cy = start_cy;
+    start_cx = end_cx;
     start_cy = end_cy;
-    end_cy = temp;
+    end_cx = temp_cx;
+    end_cy = temp_cy;
   }
 
-  for (int i = start_cy; i <= end_cy; i++) {
-    erow *row = &E.row[i];
-    if (row->size > 0 && row->chars[0] == ' ') {
-      editorRowDelChar(row, 0);
-      if (i == E.selection_start_cy) {
-        E.selection_start_cx--;
-        if (E.selection_start_cx < 0) E.selection_start_cx = 0;
-      }
-      if (i == E.selection_end_cy) {
-        E.selection_end_cx--;
-        if (E.selection_end_cx < 0) E.selection_end_cx = 0;
+  // Per selezioni su una sola riga
+  if (start_cy == end_cy) {
+    erow *row = &E.row[start_cy];
+    // Rimuovi uno spazio prima della selezione, se presente
+    if (start_cx > 0 && row->chars[start_cx - 1] == ' ') {
+      editorRowDelChar(row, start_cx - 1);
+      
+      // Aggiorna le coordinate della selezione
+      E.selection_start_cx--;
+      E.selection_end_cx--;
+    }
+  } else {
+    // Per selezioni su più righe: rimuovi spazio prima di ogni parte della selezione
+    for (int i = start_cy; i <= end_cy; i++) {
+      erow *row = &E.row[i];
+      if (i == start_cy) {
+        // Prima riga: rimuovi spazio prima di start_cx se presente
+        if (start_cx > 0 && row->chars[start_cx - 1] == ' ') {
+          editorRowDelChar(row, start_cx - 1);
+          E.selection_start_cx--;
+        }
+      } else {
+        // Altre righe: rimuovi spazio all'inizio se presente
+        if (row->size > 0 && row->chars[0] == ' ') {
+          editorRowDelChar(row, 0);
+          if (i == end_cy) {
+            E.selection_end_cx--;
+            if (E.selection_end_cx < 0) E.selection_end_cx = 0;
+          }
+        }
       }
     }
   }
+  
   E.dirty++;
 }
 
 void editorMoveSelectionRight() {
   if (!E.selection_active) return;
+  
+  int start_cx = E.selection_start_cx;
   int start_cy = E.selection_start_cy;
+  int end_cx = E.selection_end_cx;
   int end_cy = E.selection_end_cy;
 
-  if (start_cy > end_cy) {
-    int temp = start_cy;
+  // Normalizza le coordinate
+  if (start_cy > end_cy || (start_cy == end_cy && start_cx > end_cx)) {
+    int temp_cx = start_cx;
+    int temp_cy = start_cy;
+    start_cx = end_cx;
     start_cy = end_cy;
-    end_cy = temp;
+    end_cx = temp_cx;
+    end_cy = temp_cy;
   }
 
-  for (int i = start_cy; i <= end_cy; i++) {
-    erow *row = &E.row[i];
-    editorRowInsertChar(row, 0, ' ');
+  // Per selezioni su una sola riga
+  if (start_cy == end_cy) {
+    erow *row = &E.row[start_cy];
+    // Inserisci uno spazio prima della selezione
+    editorRowInsertChar(row, start_cx, ' ');
+    
+    // Aggiorna le coordinate della selezione
+    E.selection_start_cx++;
+    E.selection_end_cx++;
+  } else {
+    // Per selezioni su più righe: inserisci spazio all'inizio di ogni riga
+    for (int i = start_cy; i <= end_cy; i++) {
+      erow *row = &E.row[i];
+      if (i == start_cy) {
+        // Prima riga: inserisci spazio alla posizione start_cx
+        editorRowInsertChar(row, start_cx, ' ');
+        E.selection_start_cx++;
+      } else if (i == end_cy) {
+        // Ultima riga: inserisci spazio all'inizio
+        editorRowInsertChar(row, 0, ' ');
+        E.selection_end_cx++;
+      } else {
+        // Righe intermedie: inserisci spazio all'inizio
+        editorRowInsertChar(row, 0, ' ');
+      }
+    }
   }
-
-  E.selection_start_cx++;
-  E.selection_end_cx++;
+  
   E.dirty++;
+}
+
+/**
+ * @brief Verifica se la selezione può essere spostata a sinistra
+ *        Movimento a sinistra = rimuovere spazio prima della selezione
+ * @return 1 se ci sono spazi da rimuovere prima della selezione
+ */
+int editorCanMoveSelectionLeft() {
+  if (!E.selection_active) return 0;
+  
+  int start_cx = E.selection_start_cx;
+  int start_cy = E.selection_start_cy;
+  int end_cx = E.selection_end_cx;
+  int end_cy = E.selection_end_cy;
+
+  // Normalizza le coordinate
+  if (start_cy > end_cy || (start_cy == end_cy && start_cx > end_cx)) {
+    int temp_cx = start_cx;
+    int temp_cy = start_cy;
+    start_cx = end_cx;
+    start_cy = end_cy;
+    end_cx = temp_cx;
+    end_cy = temp_cy;
+  }
+
+  // Per selezioni su una sola riga
+  if (start_cy == end_cy) {
+    erow *row = &E.row[start_cy];
+    // Controlla se c'è uno spazio prima della selezione
+    return (start_cx > 0 && row->chars[start_cx - 1] == ' ');
+  } else {
+    // Per selezioni su più righe: controlla che TUTTE le righe abbiano spazi da rimuovere
+    for (int i = start_cy; i <= end_cy; i++) {
+      erow *row = &E.row[i];
+      if (i == start_cy) {
+        // Prima riga: controlla spazio prima di start_cx
+        if (!(start_cx > 0 && row->chars[start_cx - 1] == ' ')) {
+          return 0; // Non tutte hanno spazi
+        }
+      } else {
+        // Altre righe: controlla spazio all'inizio
+        if (!(row->size > 0 && row->chars[0] == ' ')) {
+          return 0; // Non tutte hanno spazi
+        }
+      }
+    }
+    return 1; // Tutte hanno spazi
+  }
+}
+
+/**
+ * @brief Verifica se la selezione può essere spostata a destra
+ *        Movimento a destra = inserire spazio prima della selezione (sempre possibile)
+ * @return 1 sempre se selezione attiva
+ */
+int editorCanMoveSelectionRight() {
+  return E.selection_active;
+}
+
+/**
+ * @brief Verifica se la selezione comprende righe complete
+ *        Per il movimento verticale, la selezione deve coprire righe intere
+ * @return 1 se la selezione comprende righe complete, 0 altrimenti
+ */
+int editorIsSelectionFullLines() {
+  if (!E.selection_active) return 0;
+  
+  int start_cx = E.selection_start_cx;
+  int start_cy = E.selection_start_cy;
+  int end_cx = E.selection_end_cx;
+  int end_cy = E.selection_end_cy;
+
+  // Normalizza le coordinate
+  if (start_cy > end_cy || (start_cy == end_cy && start_cx > end_cx)) {
+    int temp_cx = start_cx;
+    int temp_cy = start_cy;
+    start_cx = end_cx;
+    start_cy = end_cy;
+    end_cx = temp_cx;
+    end_cy = temp_cy;
+  }
+
+  // Se selezione su una sola riga
+  if (start_cy == end_cy) {
+    // Deve selezionare tutta la riga
+    return (start_cx == 0 && end_cx == E.row[start_cy].size);
+  }
+
+  // Se selezione su più righe
+  // Prima riga: deve iniziare da 0
+  if (start_cx != 0) return 0;
+  
+  // Ultima riga: deve finire alla fine della riga
+  if (end_cx != E.row[end_cy].size) return 0;
+  
+  return 1;
+}
+
+/**
+ * @brief Verifica se la selezione può essere spostata verticalmente
+ *        Combina i controlli per le righe complete e i limiti
+ * @return 1 se può essere spostata verticalmente, 0 altrimenti
+ */
+int editorCanMoveSelectionVertical() {
+  return editorIsSelectionFullLines();
 }
 
 void editorMoveSelection(int key) {
@@ -2146,17 +2310,32 @@ void editorMoveSelection(int key) {
 
   switch (key) {
     case ARROW_LEFT: {
+        if (!editorCanMoveSelectionLeft()) {
+            editorSetStatusMessage("Cannot move selection left - not enough spaces");
+            return;
+        }
         editorMoveSelectionLeft();
         editorSetStatusMessage("Selection moved left");
       break;
     }
     case ARROW_RIGHT: {
+        if (!editorCanMoveSelectionRight()) {
+            editorSetStatusMessage("Cannot move selection right");
+            return;
+        }
         editorMoveSelectionRight();
         editorSetStatusMessage("Selection moved right");
       break;
     }
     case ARROW_UP: {
-      if (start_cy == 0) return;
+      if (!editorCanMoveSelectionVertical()) {
+          editorSetStatusMessage("Cannot move selection up - selection must be full lines");
+          return;
+      }
+      if (start_cy == 0) {
+          editorSetStatusMessage("Cannot move selection up - already at top");
+          return;
+      }
       
       // Additional safety checks
       if (end_cy >= E.numrows || start_cy < 0) return;
@@ -2199,7 +2378,14 @@ void editorMoveSelection(int key) {
       break;
     }
     case ARROW_DOWN: {
-      if (end_cy >= E.numrows - 1) return;
+      if (!editorCanMoveSelectionVertical()) {
+          editorSetStatusMessage("Cannot move selection down - selection must be full lines");
+          return;
+      }
+      if (end_cy >= E.numrows - 1) {
+          editorSetStatusMessage("Cannot move selection down - already at bottom");
+          return;
+      }
       
       // Additional safety checks
       if (start_cy < 0 || end_cy + 1 >= E.numrows) return;
