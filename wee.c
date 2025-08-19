@@ -8,6 +8,7 @@
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <math.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -22,7 +23,7 @@
 
 /* defines */
 
-#define WEE_VERSION "0.89 Beta"
+#define WEE_VERSION "0.89.1 Beta"
 #define WEE_TAB_STOP 4
 #define WEE_QUIT_TIMES 2
 #define UNDO_BUFFER_SIZE 10
@@ -1241,8 +1242,26 @@ void editorUpdateSelectionSyntax() {
  */
 void editorDeselectSelection() {
   if (E.selection_active) {
-    editorUpdateSelectionSyntax();
+    // Store selection coordinates before deactivating
+    int start_cy = E.selection_start_cy;
+    int end_cy = E.selection_end_cy;
+
+    // Deactivate selection first
     E.selection_active = 0;
+
+    // Normalize coordinates for proper iteration
+    if (start_cy > end_cy) {
+        int temp = start_cy;
+        start_cy = end_cy;
+        end_cy = temp;
+    }
+
+    // Update syntax for all previously selected rows
+    for (int i = start_cy; i <= end_cy; i++) {
+        if (i < E.numrows) { // Check bounds
+            editorUpdateSyntax(&E.row[i]);
+        }
+    }
   }
 }
 
@@ -1481,183 +1500,100 @@ void editorScroll() {
  * @param linenum_width The width of the line number column.
  */
 void editorDrawRows(struct abuf *ab) {
-  int linenum_width = 0;
-  if (E.linenumbers) {
-    int max_linenum_digits = 1;
-    if (E.numrows > 0) {
-            int temp_num = E.numrows;
-            while (temp_num /= 10) max_linenum_digits++;
-        }
+    int linenum_width = 0;
+    if (E.linenumbers) {
+        int max_linenum_digits = (E.numrows > 0) ? (int)floor(log10(E.numrows)) + 1 : 1;
         linenum_width = max_linenum_digits + 1;
         if (linenum_width < 4) linenum_width = 4;
-  }
+    }
 
-  for (int y = 0; y < E.screenrows; y++) {
-    int filerow = y + E.rowoff;
-    if (filerow >= E.numrows) {
-      if (E.numrows == 0 && y == E.screenrows / 3) {
-        char welcome[80];
-        int welcomelen = snprintf(welcome, sizeof(welcome), "Wee editor -- version %s", WEE_VERSION);
-        int text_cols = editorGetTextCols();
-        if (welcomelen > text_cols) welcomelen = text_cols;
-        int padding = (text_cols - welcomelen) / 2;
-        if (padding) {
-          abAppend(ab, "~", 1);
-          padding--;
-        }
-        while (padding--) abAppend(ab, " ", 1);
-        abAppend(ab, welcome, welcomelen);
-      } else if (E.numrows == 0 && y == E.screenrows / 3 + 1) {
-        char author[80];
-        int authorlen = snprintf(author, sizeof(author), "by anidisc");
-        int text_cols = editorGetTextCols();
-        if (authorlen > text_cols) authorlen = text_cols;
-        int padding = (text_cols - authorlen) / 2;
-        if (padding) {
-          abAppend(ab, "~", 1);
-          padding--;
-        }
-        while (padding--) abAppend(ab, " ", 1);
-        abAppend(ab, author, authorlen);
-      } else if (E.numrows == 0 && y == E.screenrows / 3 + 2) {
-        char site[80];
-        int sitelen = snprintf(site, sizeof(site), "wee.anidisc.it");
-        int text_cols = editorGetTextCols();
-        if (sitelen > text_cols) sitelen = text_cols;
-        int padding = (text_cols - sitelen) / 2;
-        if (padding) {
-          abAppend(ab, "~", 1);
-          padding--;
-        }
-        while (padding--) abAppend(ab, " ", 1);
-        abAppend(ab, site, sitelen);
-      } else {
-        abAppend(ab, "~", 1);
-      }
-    } 
-    else {
-      if (E.linenumbers) {
-        char linenum_buf[16];
-        int len = snprintf(linenum_buf, sizeof(linenum_buf), "%*d ", linenum_width - 1, filerow + 1); 
-        abAppend(ab, "\x1b[36m", 5);
-        abAppend(ab, linenum_buf, len);
-        abAppend(ab, "\x1b[m", 3);
-      }
-      int len = E.row[filerow].rsize - E.coloff;
-      if (len < 0) len = 0;
-      if (len > E.screencols - linenum_width) len = E.screencols - linenum_width;
-      char *c = &E.row[filerow].render[E.coloff];
-      unsigned char *hl = &E.row[filerow].hl[E.coloff];
-      int current_color = -1;
-
-      // Local variables for selection coordinates
-      int local_sel_start_cx = E.selection_start_cx;
-      int local_sel_start_cy = E.selection_start_cy;
-      int local_sel_end_cx = E.selection_end_cx;
-      int local_sel_end_cy = E.selection_end_cy;
-
-      if (E.selection_active) {
-          // Ensure start is before end for drawing purposes
-          // Ensure start is before end for drawing purposes (already done in editorDelCharSelection and editorCopySelection, but good to be safe)
-          if (local_sel_start_cy > local_sel_end_cy || (local_sel_start_cy == local_sel_end_cy && local_sel_start_cx > local_sel_end_cx)) {
-              int temp_cy = local_sel_start_cy;
-              int temp_cx = local_sel_start_cx;
-              local_sel_start_cy = local_sel_end_cy;
-              local_sel_start_cx = local_sel_end_cx;
-              local_sel_end_cy = temp_cy;
-              local_sel_end_cx = temp_cx;
-          }
-
-          int sel_start_rx = 0;
-          int sel_end_rx = 0;
-
-          if (filerow < local_sel_start_cy || filerow > local_sel_end_cy) {
-              // Current row is outside the selection range, no highlighting
-              sel_start_rx = -1; // Indicate no selection for this row
-              sel_end_rx = -1;
-          } else {
-              // Current row is within the selection range
-              if (filerow == local_sel_start_cy) {
-                  sel_start_rx = editorRowCxToRx(&E.row[filerow], local_sel_start_cx);
-              }
-              else {
-                  sel_start_rx = 0; // Start from the beginning of the row
-              }
-
-              if (filerow == local_sel_end_cy) {
-                  sel_end_rx = editorRowCxToRx(&E.row[filerow], local_sel_end_cx);
-              }
-              else {
-                  sel_end_rx = E.row[filerow].rsize; // Go to the end of the row
-              }
-          }
-
-          for (int j = 0; j < len; j++) {
-            int current_render_idx = E.coloff + j; // This is the render index of the character being drawn
-            // Apply selection highlighting only if selection is still active
-            if (sel_start_rx != -1) { // Only highlight if this row is part of the selection
-                // Special case for single character selection
-                if (local_sel_start_cy == local_sel_end_cy && local_sel_start_cx == local_sel_end_cx) {
-                    if (current_render_idx == sel_start_rx) {
-                        hl[j] = HL_SELECTION;
-                    }
-                } else {
-                    if (current_render_idx >= sel_start_rx && current_render_idx < sel_end_rx) {
-                        hl[j] = HL_SELECTION;
-                    }
-                }
-            }
-          }
-      }
-
-      for (int j = 0; j < len; j++) {
-        if (filerow == E.hl_row) {
-            int start = E.hl_start > E.coloff ? E.hl_start - E.coloff : 0;
-            int end = E.hl_end > E.coloff ? E.hl_end - E.coloff : 0;
-            if (end > len) end = len;
-            if (j >= start && j < end) {
-                hl[j] = HL_MATCH;
-            }
-        }
-
-        int color = editorSyntaxToColor(hl[j]);
-        // Only consider HL_SELECTION if selection is active
-        int is_selection = (E.selection_active && hl[j] == HL_SELECTION);
-
-        if (is_selection) {
-            if (current_color != 7) { // If not already in inverse video
-                abAppend(ab, "\x1b[7m", 4); // Set inverse video
-                current_color = 7;
+    for (int y = 0; y < E.screenrows; y++) {
+        int filerow = y + E.rowoff;
+        if (filerow >= E.numrows) {
+            // Draw welcome message or tildes for empty lines
+            if (E.numrows == 0 && y == E.screenrows / 3) {
+                char welcome[80];
+                int welcomelen = snprintf(welcome, sizeof(welcome), "Wee editor -- version %s", WEE_VERSION);
+                int text_cols = editorGetTextCols();
+                if (welcomelen > text_cols) welcomelen = text_cols;
+                int padding = (text_cols - welcomelen) / 2;
+                if (padding) { abAppend(ab, "~", 1); padding--; }
+                while (padding--) abAppend(ab, " ", 1);
+                abAppend(ab, welcome, welcomelen);
+            } else {
+                abAppend(ab, "~", 1);
             }
         } else {
-            if (current_color == 7) { // If was in inverse video, reset it
-                abAppend(ab, "\x1b[27m", 5); // Reset inverse video
-                current_color = -1; // Reset current_color to force re-evaluation of normal color
+            // Draw line numbers
+            if (E.linenumbers) {
+                char linenum_buf[16];
+                snprintf(linenum_buf, sizeof(linenum_buf), "%*d ", linenum_width - 1, filerow + 1); 
+                abAppend(ab, "\x1b[36m", 5); // Cyan color for line numbers
+                abAppend(ab, linenum_buf, strlen(linenum_buf));
+                abAppend(ab, "\x1b[m", 3);
             }
-            if (color != current_color) {
-                current_color = color;
-                char buf[16];
-                int clen = snprintf(buf, sizeof(buf), "\x1b[%dm", color);
-                abAppend(ab, buf, clen);
-            }
-        }
 
-        if (iscntrl(c[j])) { // Control characters
-          char sym = (c[j] <= 26) ? '@' + c[j] : '?';
-          abAppend(ab, &sym, 1);
-        } else { // Normal characters
-          abAppend(ab, &c[j], 1);
+            erow *row = &E.row[filerow];
+            int len = row->rsize - E.coloff;
+            if (len < 0) len = 0;
+            if (len > E.screencols - linenum_width) len = E.screencols - linenum_width;
+            
+            char *c = &row->render[E.coloff];
+            unsigned char *hl = &row->hl[E.coloff];
+            int current_color = -1;
+
+            // Normalize selection coordinates for drawing this row
+            int local_start_cx = -1, local_end_cx = -1;
+            if (E.selection_active) {
+                int norm_start_cx = E.selection_start_cx, norm_start_cy = E.selection_start_cy;
+                int norm_end_cx = E.selection_end_cx, norm_end_cy = E.selection_end_cy;
+
+                if (norm_start_cy > norm_end_cy || (norm_start_cy == norm_end_cy && norm_start_cx > norm_end_cx)) {
+                    int temp_cx = norm_start_cx, temp_cy = norm_start_cy;
+                    norm_start_cx = norm_end_cx; norm_start_cy = norm_end_cy;
+                    norm_end_cx = temp_cx; norm_end_cy = temp_cy;
+                }
+
+                if (filerow >= norm_start_cy && filerow <= norm_end_cy) {
+                    local_start_cx = (filerow == norm_start_cy) ? norm_start_cx : 0;
+                    local_end_cx = (filerow == norm_end_cy) ? norm_end_cx : row->size;
+                }
+            }
+            
+            for (int j = 0; j < len; j++) {
+                int current_char_cx = editorRowRxToCx(row, E.coloff + j);
+                int is_selected = (E.selection_active && local_start_cx != -1 &&
+                                   current_char_cx >= local_start_cx && current_char_cx < local_end_cx);
+
+                if (is_selected) {
+                    if (current_color != 7) {
+                        abAppend(ab, "\x1b[7m", 4); // Inverse video
+                        current_color = 7;
+                    }
+                } else {
+                    if (current_color == 7) {
+                        abAppend(ab, "\x1b[27m", 5); // Reset inverse video
+                    }
+                    int color = editorSyntaxToColor(hl[j]);
+                    if (color != current_color) {
+                        char buf[16];
+                        snprintf(buf, sizeof(buf), "\x1b[%dm", color);
+                        abAppend(ab, buf, strlen(buf));
+                        current_color = color;
+                    }
+                }
+                
+                // Render character
+                abAppend(ab, &c[j], 1);
+            }
+            
+            // Reset colors at the end of the line
+            if (current_color == 7) abAppend(ab, "\x1b[27m", 5);
+            abAppend(ab, "\x1b[39m", 5);
         }
-      }
-      // Ensure inverse video is reset at the end of the line
-      if (current_color == 7) {
-          abAppend(ab, "\x1b[27m", 5);
-      }
-      abAppend(ab, "\x1b[39m", 5); // Reset foreground color
+        abAppend(ab, "\x1b[K", 3);
+        abAppend(ab, "\r\n", 2);
     }
-    abAppend(ab, "\x1b[K", 3);
-    abAppend(ab, "\r\n", 2);
-  }
 }
 
 /**
@@ -2828,87 +2764,54 @@ void editorQuickSelectFullLine(int direction) {
 }
 
 /**
- * @brief Simplified character selection for Shift+Left/Right
- *        Uses anchor-cursor model: anchor stays fixed, cursor moves
+ * @brief Simplified character selection for Shift+Left/Right using the anchor-cursor model.
  * @param direction -1 for left, +1 for right
  */
 void editorQuickSelectChar(int direction) {
+    // If there are no rows, do nothing.
     if (E.cy >= E.numrows) {
         editorSetStatusMessage("No text to select");
         return;
     }
-    
-    // If no selection is active, set anchor to current cursor position
+
+    // If no selection is active, set the anchor (anc1) to the current cursor position.
     if (!E.selection_active) {
-        E.selection_start_cx = E.cx;  // This becomes our anchor
+        E.selection_start_cx = E.cx;
         E.selection_start_cy = E.cy;
-        E.selection_end_cx = E.cx;    // This will be our moving cursor
-        E.selection_end_cy = E.cy;
         E.selection_active = 1;
     }
-    
-    // Move the cursor (selection end point) in the specified direction
-    if (direction == -1) { // Left
+
+    // Move the actual editor cursor based on the direction.
+    if (direction == -1) { // Move left
         if (E.cx > 0) {
             E.cx--;
         } else if (E.cy > 0) {
             E.cy--;
             E.cx = E.row[E.cy].size;
-        } else {
-            editorSetStatusMessage("Cannot move left - at beginning of file");
-            return;
         }
-    } else { // Right
-        // Get current row size AFTER potential line change
-        erow *current_row = &E.row[E.cy];
-        if (E.cx < current_row->size) {
+    } else { // Move right
+        erow *row = &E.row[E.cy];
+        if (E.cx < row->size) {
             E.cx++;
         } else if (E.cy < E.numrows - 1) {
             E.cy++;
             E.cx = 0;
-        } else {
-            editorSetStatusMessage("Cannot move right - at end of file");
-            return;
         }
     }
-    
-    // Update the selection end to the new cursor position
+
+    // The cursor (anc2) always follows the editor's cursor.
     E.selection_end_cx = E.cx;
     E.selection_end_cy = E.cy;
-    
-    // Check if anchor and cursor are at the same position (empty selection)
-    if (E.selection_start_cy == E.selection_end_cy && 
-        E.selection_start_cx == E.selection_end_cx) {
+
+    // If the anchor and the cursor are at the same position, the selection is empty.
+    if (E.selection_start_cy == E.selection_end_cy && E.selection_start_cx == E.selection_end_cx) {
         editorDeselectSelection();
         E.mode = NORMAL_MODE;
         editorSetStatusMessage("Selection cleared");
-        return;
-    }
-    
-    // Show selection info
-    int start_cx = E.selection_start_cx;
-    int start_cy = E.selection_start_cy;
-    int end_cx = E.selection_end_cx;
-    int end_cy = E.selection_end_cy;
-    
-    // Normalize for display (but don't change the actual values)
-    if (start_cy > end_cy || (start_cy == end_cy && start_cx > end_cx)) {
-        int temp_cx = start_cx;
-        int temp_cy = start_cy;
-        start_cx = end_cx;
-        start_cy = end_cy;
-        end_cx = temp_cx;
-        end_cy = temp_cy;
-    }
-    
-    if (start_cy == end_cy) {
-        editorSetStatusMessage("Selected: line %d, chars %d-%d", start_cy + 1, start_cx + 1, end_cx);
     } else {
-        editorSetStatusMessage("Selected: lines %d-%d", start_cy + 1, end_cy + 1);
+        editorSetStatusMessage("Selection active");
     }
 }
-
-
 /* file browser */
 
 /**
