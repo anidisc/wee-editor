@@ -23,7 +23,7 @@
 
 /* defines */
 
-#define WEE_VERSION "0.89.1 Beta"
+#define WEE_VERSION "0.90.1"
 #define WEE_TAB_STOP 4
 #define WEE_QUIT_TIMES 2
 #define UNDO_BUFFER_SIZE 10
@@ -47,7 +47,8 @@ enum editorKey {
   SHIFT_UP,
   SHIFT_DOWN,
   SHIFT_LEFT,
-  SHIFT_RIGHT
+  SHIFT_RIGHT,
+  SHIFT_TAB
 };
 
 enum editorHighlight {
@@ -200,6 +201,9 @@ void editorClearUndoSystem();
 struct EditorSnapshot* editorCopyCurrentState(const char *description);
 void editorRestoreSnapshot(struct EditorSnapshot *snap);
 void editorSelectRowText();
+void editorSelectInsideDelims();
+int findMatchingRightInLine(erow *row, int start_idx, char open_ch, char close_ch);
+int findNextQuoteInLine(erow *row, int start_idx, char quote);
 void editorQuickSelectFullLine(int direction);
 void editorQuickSelectChar(int direction);
 void abAppend(struct abuf *ab, const char *s, int len);
@@ -296,6 +300,7 @@ int editorReadKey() {
           case 'D': return ARROW_LEFT;
           case 'H': return HOME_KEY;
           case 'F': return END_KEY;
+          case 'Z': return SHIFT_TAB; // Shift+Tab (ESC[Z)
         }
       }
     } else if (seq[0] == 'O') {
@@ -533,6 +538,13 @@ void editorInsertChar(int c) {
  */
 void editorInsertNewline() {
   // Lo snapshot sarà gestito dal chiamante
+  int prev_indent = 0;
+  if (E.cy < E.numrows) {
+    erow *prow = &E.row[E.cy];
+    // Calcola l'indentazione della riga corrente (che diventerà quella precedente dopo lo split)
+    while (prev_indent < prow->size && prow->chars[prev_indent] == ' ') prev_indent++;
+  }
+
   if (E.cx == 0) {
     editorInsertRow(E.cy, "", 0);
   } else {
@@ -544,6 +556,15 @@ void editorInsertNewline() {
   }
   E.cy++;
   E.cx = 0;
+
+  // Inserisce l'indentazione nella nuova riga e posiziona il cursore
+  if (E.cy < E.numrows && prev_indent > 0) {
+    erow *nrow = &E.row[E.cy];
+    for (int i = 0; i < prev_indent; i++) {
+      editorRowInsertChar(nrow, i, ' ');
+      E.cx++;
+    }
+  }
 }
 
 /**
@@ -1601,8 +1622,7 @@ void editorDrawRows(struct abuf *ab) {
  * @param ab The append buffer to add the text to be drawn to.
  */
 void editorDrawStatusBar(struct abuf *ab) {
-  abAppend(ab, "\x1b[7m", 4);
-  
+  // Status bar senza inversione globale: evidenziamo solo [nomefile]
   char *basename = E.filename ? strrchr(E.filename, '/') : NULL;
   if (basename) {
     basename++;
@@ -1610,24 +1630,29 @@ void editorDrawStatusBar(struct abuf *ab) {
     basename = E.filename;
   }
 
+  const char *name = basename ? basename : "No Name";
   char status[256];
   int len = 0;
 
-  // File name part
-  abAppend(ab, "\x1b[37;44m", 7);
+  // Spazio iniziale per separare dal bordo
+  abAppend(ab, " ", 1);
+  len += 1;
+
+  // Blocco [nomefile] con sfondo cyan e testo nero per leggibilità
+  // \x1b[30;46m = fg nero, bg cyan
+  abAppend(ab, "\x1b[30;46m", 9);
   abAppend(ab, "[", 1);
-  abAppend(ab, basename ? basename : "No Name", strlen(basename ? basename : "No Name"));
+  abAppend(ab, name, strlen(name));
   abAppend(ab, "]", 1);
-  abAppend(ab, "\x1b[m", 3);
-  abAppend(ab, "\x1b[7m", 4);
+  abAppend(ab, "\x1b[m", 3); // reset
+  len += 2 + strlen(name);
 
-  len = 2 + strlen(basename ? basename : "No Name");
-
-  // Other info
+  // Informazioni aggiuntive a sinistra
   int len2 = snprintf(status, sizeof(status), " - %d lines %s", E.numrows, E.dirty ? "(modified)" : "");
   abAppend(ab, status, len2);
   len += len2;
 
+  // Stato a destra
   char rstatus[80];
   int rlen = snprintf(rstatus, sizeof(rstatus), "%s | %d/%d", E.syntax ? E.syntax->language : "no ft", E.cy + 1, E.numrows);
   
@@ -1816,6 +1841,9 @@ void editorProcessKeypress() {
         editorSetStatusMessage("Selection cut.");
         editorRefreshScreen(); // Add this
         break;
+      case SHIFT_TAB:
+        editorSelectInsideDelims();
+        break;
       default:
         if (!iscntrl(c) && c < 128) { // Check if it's a printable ASCII character
           editorCreateSnapshot("Replace selection");
@@ -1891,11 +1919,31 @@ void editorProcessKeypress() {
         break;
       case BACKSPACE:
       case CTRL_KEY('h'):
-      case DEL_KEY:
+      case DEL_KEY: {
+        // Smart outdent su BACKSPACE quando il cursore è sul primo carattere non-spazio
+        if (c != DEL_KEY && E.cy < E.numrows) {
+          erow *row = &E.row[E.cy];
+          int first_ns = 0;
+          while (first_ns < row->size && row->chars[first_ns] == ' ') first_ns++;
+          if (E.cx == first_ns && first_ns > 0) {
+            int target = (first_ns - 1) / WEE_TAB_STOP * WEE_TAB_STOP; // tab stop precedente
+            int to_delete = first_ns - target;
+            // Elimina 'to_delete' spazi dall'inizio della riga
+            for (int i = 0; i < to_delete; i++) {
+              if (row->size > 0 && row->chars[0] == ' ') {
+                editorRowDelChar(row, 0);
+              }
+            }
+            E.cx = target;
+            E.dirty++;
+            break; // Non eseguire la cancellazione standard del carattere
+          }
+        }
         editorCreateSnapshot("Delete character");
         if (c == DEL_KEY) editorMoveCursor(ARROW_RIGHT);
         editorDelChar();
         break;
+      }
       case PAGE_UP:
       case PAGE_DOWN:
         {
@@ -1924,6 +1972,9 @@ void editorProcessKeypress() {
         break;
       case SHIFT_RIGHT:
         editorQuickSelectChar(1);
+        break;
+      case SHIFT_TAB:
+        editorSelectInsideDelims();
         break;
       case CTRL_KEY('o'): {
         char *path = editorFileBrowser(".");
@@ -2695,7 +2746,85 @@ void editorSelectRowText() {
     // Muovi il cursore all'inizio della selezione
     E.cx = start_cx;
     
-    editorSetStatusMessage("Row text selected (chars %d-%d)", start_cx, end_cx - 1);
+editorSetStatusMessage("Row text selected (chars %d-%d)", start_cx, end_cx - 1);
+}
+
+/* Helpers for delimiter matching on a single line */
+int findMatchingRightInLine(erow *row, int start_idx, char open_ch, char close_ch) {
+    int n = row->size;
+    int depth = 1;
+    for (int i = start_idx + 1; i < n; i++) {
+        char ch = row->chars[i];
+        if (ch == open_ch) depth++;
+        else if (ch == close_ch) {
+            depth--;
+            if (depth == 0) return i;
+        }
+    }
+    return -1;
+}
+
+int findNextQuoteInLine(erow *row, int start_idx, char quote) {
+    int n = row->size;
+    int escaped = 0;
+    for (int i = start_idx + 1; i < n; i++) {
+        char ch = row->chars[i];
+        if (!escaped && ch == '\\') { escaped = 1; continue; }
+        if (!escaped && ch == quote) return i;
+        escaped = 0;
+    }
+    return -1;
+}
+
+/* Select inside surrounding delimiters on the same line: (), [], {}, < > , ' ', " " */
+void editorSelectInsideDelims() {
+    if (E.cy >= E.numrows) {
+        editorSetStatusMessage("No line to operate on");
+        return;
+    }
+    erow *row = &E.row[E.cy];
+    int n = row->size;
+    if (n == 0) { editorSetStatusMessage("Empty line"); return; }
+
+    int cx = E.cx;
+
+    // Scan leftwards for ANY opener/quote, pick the first valid pair enclosing the cursor
+    for (int left = cx - 1; left >= 0; left--) {
+        char ch = row->chars[left];
+        int right = -1;
+        char open_ch = 0, close_ch = 0;
+        int is_quote = 0;
+        switch (ch) {
+            case '(': open_ch='('; close_ch=')'; break;
+            case '[': open_ch='['; close_ch=']'; break;
+            case '{': open_ch='{'; close_ch='}'; break;
+            case '<': open_ch='<'; close_ch='>'; break;
+            case '"': is_quote=1; open_ch='"'; close_ch='"'; break;
+            case '\'': is_quote=1; open_ch='\''; close_ch='\''; break;
+            default: continue;
+        }
+        if (is_quote) {
+            right = findNextQuoteInLine(row, left, close_ch);
+        } else {
+            right = findMatchingRightInLine(row, left, open_ch, close_ch);
+        }
+        if (right < 0) continue;
+        // Cursor must be within (left, right]
+        if (!(left < cx && cx <= right)) continue;
+        if (right - left <= 1) continue;
+
+        // Select inside
+        E.selection_start_cx = left + 1;
+        E.selection_start_cy = E.cy;
+        E.selection_end_cx = right;
+        E.selection_end_cy = E.cy;
+        E.selection_active = 1;
+        E.mode = SELECTION_MODE;
+        editorSetStatusMessage("Selected inside %c%c", open_ch, close_ch);
+        return;
+    }
+
+    editorSetStatusMessage("No surrounding delimiters found");
 }
 
 /**
@@ -2966,6 +3095,7 @@ void editorShowHelp() {
     const char *help_text[] = {
         "Wee Editor Help",
         "",
+        "-- Normal Mode --",
         "Ctrl-S: Save",
         "Ctrl-Y: Save As",
         "Ctrl-Q: Quit",
@@ -2979,18 +3109,21 @@ void editorShowHelp() {
         "Ctrl-Z: Undo",
         "Ctrl-R: Redo",
         "",
+        "Ctrl-W: Copy Line",
+        "Ctrl-K: Cut Line",
+        "Ctrl-U: Paste",
         "Ctrl-B: Start Selection",
         "Ctrl-E: End Selection & Enter Selection Mode",
         "Ctrl-A: Select All",
+        "Alt-R : Select Row",
+        "Shift-Arrows : Rapid Selection / Press ESC to enter in SEL. MODE",
+        "Shift-Tab :    Select text between brachets",
+        "-- Selection Mode --",
         "ESC (in Sel. Mode): Cancel Selection",
         "Ctrl-W (in Sel. Mode): Copy Selection",
         "Ctrl-K (in Sel. Mode): Cut Selection",
         "DEL (in Sel. Mode): Delete Selection",
         "Arrows (in Sel. Mode): Move Selection (Up/Down/Left/Right)",
-        "",
-        "Ctrl-W: Copy Line",
-        "Ctrl-K: Cut Line",
-        "Ctrl-U: Paste",
         NULL
     };
 
@@ -3060,6 +3193,49 @@ void initEditor() {
   E.screenrows -= 2;
 }
 
+void printHelp() {
+    const char *help_text[] = {
+        "Wee Editor Help",
+        "",
+        "Usage: wee [options] [filename]",
+        "",
+        "Options:",
+        "  --version, -v    Print version and exit.",
+        "  --help, -h       Print this help message and exit.",
+        "",
+        "Keybindings:",
+        "  Ctrl-S: Save",
+        "  Ctrl-Y: Save As",
+        "  Ctrl-Q: Quit",
+        "  Ctrl-F: Find",
+        "  Ctrl-O: Open File Browser",
+        "  Ctrl-N: Toggle Line Numbers",
+        "  Ctrl-T: New File",
+        "  Ctrl-G: Show this Help",
+        "",
+        "  Ctrl-J: Jump to Line",
+        "  Ctrl-Z: Undo",
+        "  Ctrl-R: Redo",
+        "",
+        "  Ctrl-B: Start Selection",
+        "  Ctrl-E: End Selection & Enter Selection Mode",
+        "  Ctrl-A: Select All",
+        "  ESC (in Sel. Mode): Cancel Selection",
+        "  Ctrl-W (in Sel. Mode): Copy Selection",
+        "  Ctrl-K (in Sel. Mode): Cut Selection",
+        "  DEL (in Sel. Mode): Delete Selection",
+        "  Arrows (in Sel. Mode): Move Selection (Up/Down/Left/Right)",
+        "",
+        "  Ctrl-W: Copy Line",
+        "  Ctrl-K: Cut Line",
+        "  Ctrl-U: Paste",
+        NULL
+    };
+    for (int i = 0; help_text[i] != NULL; i++) {
+        printf("%s\n", help_text[i]);
+    }
+}
+
 /**
  * @brief Main function of the program.
  * @param argc Number of command-line arguments.
@@ -3067,6 +3243,17 @@ void initEditor() {
  * @return 0 on success, 1 on error.
  */
 int main(int argc, char *argv[]) {
+  if (argc == 2) {
+    if (strcmp(argv[1], "--version") == 0 || strcmp(argv[1], "-v") == 0) {
+      printf("Wee Editor -  by anidisc 'wee.anidisc.it '  -- version %s\n", WEE_VERSION);
+      return 0;
+    }
+    if (strcmp(argv[1], "--help") == 0 || strcmp(argv[1], "-h") == 0) {
+      printHelp();
+      return 0;
+    }
+  }
+
   enableRawMode();
   initEditor();
   if (argc >= 2) {
@@ -3081,3 +3268,4 @@ int main(int argc, char *argv[]) {
   }
   return 0;
 }
+
