@@ -23,7 +23,7 @@
 
 /* defines */
 
-#define WEE_VERSION "0.90.1"
+#define WEE_VERSION "0.91"
 #define WEE_TAB_STOP 4
 #define WEE_QUIT_TIMES 2
 #define UNDO_BUFFER_SIZE 10
@@ -206,6 +206,13 @@ int findMatchingRightInLine(erow *row, int start_idx, char open_ch, char close_c
 int findNextQuoteInLine(erow *row, int start_idx, char quote);
 void editorQuickSelectFullLine(int direction);
 void editorQuickSelectChar(int direction);
+
+/* Find & Replace */
+int editorCountOccurrencesInRow(erow *row, const char *needle);
+int editorRowReplaceAt(erow *row, int at, int del_len, const char *repl, int repl_len);
+int editorRowReplaceAll(erow *row, const char *needle, const char *repl);
+int editorReplaceAllInBuffer(const char *needle, const char *repl);
+
 void abAppend(struct abuf *ab, const char *s, int len);
 
 
@@ -1398,7 +1405,46 @@ void editorFindCallback(char *query, int key) {
   } else if (key == ARROW_LEFT || key == ARROW_UP) {
     direction = -1;
   }
-  else { // Any other key resets search
+  else if (key == CTRL_KEY('r')) {
+    // Trigger Replace-All flow using current query
+    if (!query || strlen(query) == 0) {
+      editorSetStatusMessage("Enter a search term first, then press Ctrl-R to replace.");
+      return;
+    }
+
+    // Ask for replacement text
+    char *repl = editorPrompt("Replace with: %s (ESC to cancel)", NULL);
+    if (!repl) {
+      editorSetStatusMessage("Replace cancelled.");
+      return;
+    }
+
+    // Count occurrences first
+    int total = 0;
+    for (int i = 0; i < E.numrows; i++) {
+      total += editorCountOccurrencesInRow(&E.row[i], query);
+    }
+
+    if (total == 0) {
+      editorSetStatusMessage("No occurrences of '%s' found.", query);
+      free(repl);
+      return;
+    }
+
+    editorSetStatusMessage("Replace all %d whole-word occurrence(s) of '%s' with '%s'? (y/a)", total, query, repl);
+    editorRefreshScreen();
+    int confirm = editorReadKey();
+    if (confirm == 'y' || confirm == 'Y') {
+      editorCreateSnapshot("Replace all");
+      int replaced = editorReplaceAllInBuffer(query, repl);
+      editorDeselectSelection();
+      editorSetStatusMessage("Replaced %d occurrence(s). Press ESC to close search.", replaced);
+    } else {
+      editorSetStatusMessage("Replace aborted.");
+    }
+    free(repl);
+    return;
+  } else { // Any other key resets search
     last_match = -1;
     direction = 1;
   }
@@ -2941,6 +2987,96 @@ void editorQuickSelectChar(int direction) {
         editorSetStatusMessage("Selection active");
     }
 }
+/*
+ * Find \u0026 Replace helpers
+ */
+
+static int editorIsWordBoundaryInRow(erow *row, int pos, int len) {
+  // Check left boundary
+  if (pos > 0) {
+    char left = row->chars[pos - 1];
+    if (!is_separator(left)) return 0;
+  }
+  // Check right boundary
+  int rpos = pos + len;
+  if (rpos < row->size) {
+    char right = row->chars[rpos];
+    if (!is_separator(right)) return 0;
+  }
+  return 1;
+}
+
+int editorCountOccurrencesInRow(erow *row, const char *needle) {
+  if (!needle || !*needle) return 0;
+  int count = 0;
+  size_t nlen = strlen(needle);
+  if (nlen == 0) return 0;
+  int search_from = 0;
+  while (search_from <= row->size - (int)nlen) {
+    char *m = strstr(row->chars + search_from, needle);
+    if (!m) break;
+    int at = (int)(m - row->chars);
+    if (editorIsWordBoundaryInRow(row, at, (int)nlen)) {
+      count++;
+      search_from = at + (int)nlen;
+    } else {
+      search_from = at + 1;
+    }
+  }
+  return count;
+}
+
+int editorRowReplaceAt(erow *row, int at, int del_len, const char *repl, int repl_len) {
+  if (at < 0 || at > row->size || del_len < 0 || at + del_len > row->size) return 0;
+  int new_size = row->size - del_len + repl_len;
+  char *new_chars = malloc(new_size + 1);
+  if (!new_chars) return 0;
+
+  // Copy before match
+  memcpy(new_chars, row->chars, at);
+  // Copy replacement
+  if (repl_len > 0) memcpy(new_chars + at, repl, repl_len);
+  // Copy after match
+  memcpy(new_chars + at + repl_len, row->chars + at + del_len, row->size - (at + del_len));
+
+  new_chars[new_size] = '\0';
+  free(row->chars);
+  row->chars = new_chars;
+  row->size = new_size;
+  editorUpdateRow(row);
+  E.dirty++;
+  return 1;
+}
+
+int editorRowReplaceAll(erow *row, const char *needle, const char *repl) {
+  if (!needle || !*needle) return 0;
+  int replaced = 0;
+  size_t nlen = strlen(needle);
+  size_t rlen = repl ? strlen(repl) : 0;
+  int search_from = 0;
+  while (search_from <= row->size - (int)nlen) {
+    char *m = strstr(row->chars + search_from, needle);
+    if (!m) break;
+    int at = (int)(m - row->chars);
+    if (!editorIsWordBoundaryInRow(row, at, (int)nlen)) {
+      search_from = at + 1; // skip this non-whole-word occurrence
+      continue;
+    }
+    editorRowReplaceAt(row, at, (int)nlen, repl, (int)rlen);
+    replaced++;
+    search_from = at + (int)rlen;
+  }
+  return replaced;
+}
+
+int editorReplaceAllInBuffer(const char *needle, const char *repl) {
+  int total = 0;
+  for (int i = 0; i < E.numrows; i++) {
+    total += editorRowReplaceAll(&E.row[i], needle, repl);
+  }
+  return total;
+}
+
 /* file browser */
 
 /**
