@@ -23,7 +23,7 @@
 
 /* defines */
 
-#define WEE_VERSION "0.91"
+#define WEE_VERSION "0.92.1"
 #define WEE_TAB_STOP 4
 #define WEE_QUIT_TIMES 2
 #define UNDO_BUFFER_SIZE 10
@@ -1299,7 +1299,16 @@ void editorSelectSyntaxHighlight() {
 
   char *ext = strrchr(E.filename, '.');
 
-  DIR *d = opendir("syntax");
+  DIR *d = NULL;
+#ifdef SYNTAX_DIR
+  d = opendir(SYNTAX_DIR);
+  if (!d) {
+    // Fallback to local ./syntax if user config dir doesn't exist
+    d = opendir("syntax");
+  }
+#else
+  d = opendir("syntax");
+#endif
   if (!d) return;
 
   struct dirent *dir;
@@ -1307,7 +1316,15 @@ void editorSelectSyntaxHighlight() {
     if (dir->d_name[0] == '.') continue;
 
     char filepath[1024];
+#ifdef SYNTAX_DIR
+    if (access(SYNTAX_DIR, R_OK | X_OK) == 0) {
+      snprintf(filepath, sizeof(filepath), "%s/%s", SYNTAX_DIR, dir->d_name);
+    } else {
+      snprintf(filepath, sizeof(filepath), "syntax/%s", dir->d_name);
+    }
+#else
     snprintf(filepath, sizeof(filepath), "syntax/%s", dir->d_name);
+#endif
 
     FILE *fp = fopen(filepath, "r");
     if (!fp) continue;
@@ -2822,8 +2839,241 @@ int findNextQuoteInLine(erow *row, int start_idx, char quote) {
     return -1;
 }
 
-/* Select inside surrounding delimiters on the same line: (), [], {}, < > , ' ', " " */
+/* Helpers for multi-line delimiter scanning */
+static int pos_cmp(int r1, int c1, int r2, int c2) {
+    if (r1 != r2) return (r1 < r2) ? -1 : 1;
+    if (c1 != c2) return (c1 < c2) ? -1 : 1;
+    return 0;
+}
+
+static int retreat_pos(int *r, int *c) {
+    if (*r < 0) return 0;
+    if (*c > 0) { (*c)--; return 1; }
+    if (*r == 0) return 0;
+    (*r)--;
+    *c = E.row[*r].size;
+    return 1;
+}
+
+static int advance_pos(int *r, int *c) {
+    if (*r >= E.numrows) return 0;
+    erow *row = &E.row[*r];
+    if (*c < row->size) { (*c)++; return 1; }
+    if (*r == E.numrows - 1) return 0;
+    (*r)++;
+    *c = 0;
+    return 1;
+}
+
+static int get_char_at(int r, int c, char *out) {
+    if (r < 0 || r >= E.numrows) return 0;
+    erow *row = &E.row[r];
+    if (c < 0 || c >= row->size) return 0;
+    *out = row->chars[c];
+    return 1;
+}
+
+static int find_prev_open_any(int sr, int sc, int *orow, int *ocx, char *open_ch, char *close_ch) {
+    int r = sr, c = sc;
+    // Start from previous char
+    if (!retreat_pos(&r, &c)) return 0;
+    for (;;) {
+        char ch;
+        if (get_char_at(r, c, &ch)) {
+            switch (ch) {
+                case '(': *open_ch='('; *close_ch=')'; *orow=r; *ocx=c; return 1;
+                case '[': *open_ch='['; *close_ch=']'; *orow=r; *ocx=c; return 1;
+                case '{': *open_ch='{'; *close_ch='}'; *orow=r; *ocx=c; return 1;
+                case '<': *open_ch='<'; *close_ch='>'; *orow=r; *ocx=c; return 1;
+                default: break;
+            }
+        }
+        if (!retreat_pos(&r, &c)) break;
+    }
+    return 0;
+}
+
+static int find_matching_right_across(int sr, int sc, char open_ch, char close_ch, int *orow, int *ocx) {
+    int depth = 1;
+    int r = sr, c = sc;
+    // Move to next char after open
+    if (!advance_pos(&r, &c)) return 0;
+    for (;;) {
+        char ch;
+        if (get_char_at(r, c, &ch)) {
+            if (ch == open_ch) depth++;
+            else if (ch == close_ch) {
+                depth--;
+                if (depth == 0) { *orow = r; *ocx = c; return 1; }
+            }
+        }
+        if (!advance_pos(&r, &c)) break;
+    }
+    return 0;
+}
+
+/* Quote helpers for multi-line scanning */
+static int is_unescaped_quote_at(int r, int c, char quote) {
+    if (r < 0 || r >= E.numrows) return 0;
+    erow *row = &E.row[r];
+    if (c < 0 || c >= row->size) return 0;
+    if (row->chars[c] != quote) return 0;
+    // Count backslashes immediately preceding this position on the same line
+    int bs = 0;
+    for (int i = c - 1; i >= 0 && row->chars[i] == '\\'; i--) bs++;
+    return (bs % 2) == 0; // even number => not escaped
+}
+
+static int find_prev_unescaped_quote(int sr, int sc, int *orow, int *ocx, char *quote_char) {
+    int r = sr, c = sc;
+    if (!retreat_pos(&r, &c)) return 0;
+    for (;;) {
+        char ch;
+        if (get_char_at(r, c, &ch)) {
+            if ((ch == '"' || ch == '\'') && is_unescaped_quote_at(r, c, ch)) {
+                *orow = r; *ocx = c; *quote_char = ch; return 1;
+            }
+        }
+        if (!retreat_pos(&r, &c)) break;
+    }
+    return 0;
+}
+
+static int find_matching_quote_across(int sr, int sc, char quote, int *mr, int *mc) {
+    int r = sr, c = sc;
+    if (!advance_pos(&r, &c)) return 0;
+    for (;;) {
+        if (is_unescaped_quote_at(r, c, quote)) { *mr = r; *mc = c; return 1; }
+        if (!advance_pos(&r, &c)) break;
+    }
+    return 0;
+}
+
+/* Check if a line contains only optional whitespace plus a single delimiter at position c */
+static int line_is_only_delim(int r, int c, char delim) {
+    if (r < 0 || r >= E.numrows) return 0;
+    erow *row = &E.row[r];
+    if (c < 0 || c >= row->size) return 0;
+    if (row->chars[c] != delim) return 0;
+    // Check left side
+    for (int i = 0; i < c; i++) {
+        if (row->chars[i] != ' ' && row->chars[i] != '\t') return 0;
+    }
+    // Check right side
+    for (int i = c + 1; i < row->size; i++) {
+        if (row->chars[i] != ' ' && row->chars[i] != '\t') return 0;
+    }
+    return 1;
+}
+
+/* Select inside surrounding delimiters on multiple lines: (), [], {}, < >, and also multi-line quotes ' ". */
 void editorSelectInsideDelims() {
+    if (E.numrows == 0) { editorSetStatusMessage("Empty buffer"); return; }
+
+    // Cursor position
+    int cur_r = E.cy;
+    int cur_c = E.cx;
+
+    // Try multi-line brackets first: find nearest left opener whose match encloses the cursor
+    int best_or = -1, best_oc = -1, best_cr = -1, best_cc = -1;
+    char best_open = 0, best_close = 0;
+
+    int probe_r = cur_r, probe_c = cur_c;
+    // We iterate backwards, and for each opener we try to find its matching closer
+    while (find_prev_open_any(probe_r, probe_c, &probe_r, &probe_c, &best_open, &best_close)) {
+        int match_r, match_c;
+        if (find_matching_right_across(probe_r, probe_c, best_open, best_close, &match_r, &match_c)) {
+            // Check if cursor is strictly inside (open, close]
+            // Allow selecting empty only if there is at least one char between
+            int inside_left = (pos_cmp(probe_r, probe_c, cur_r, cur_c) < 0);
+            int inside_right = (pos_cmp(cur_r, cur_c, match_r, match_c) <= 0);
+            if (inside_left && inside_right && !(probe_r == match_r && match_c - probe_c <= 1)) {
+                // Choose the innermost by picking the opener closest to cursor (max position)
+                if (best_or == -1 || pos_cmp(best_or, best_oc, probe_r, probe_c) < 0) {
+                    best_or = probe_r; best_oc = probe_c; best_cr = match_r; best_cc = match_c;
+                }
+            }
+        }
+        // Continue searching leftwards from current opener position
+    }
+
+    if (best_or != -1) {
+        // Trim outer lines if they only contain the delimiters
+        int start_r = best_or, start_c = best_oc + 1;
+        int end_r = best_cr, end_c = best_cc;
+
+        if (line_is_only_delim(best_or, best_oc, best_open)) {
+            start_r = best_or + 1;
+            start_c = 0;
+        }
+        if (line_is_only_delim(best_cr, best_cc, best_close)) {
+            end_r = best_cr - 1;
+            end_c = (end_r >= 0 && end_r < E.numrows) ? E.row[end_r].size : 0;
+        }
+
+        // Validate range
+        if (start_r > end_r || (start_r == end_r && start_c >= end_c)) {
+            editorSetStatusMessage("Nothing inside delimiters");
+            return;
+        }
+
+        // Select inside these multi-line delimiters (exclusive of delimiters and outer-only lines)
+        E.selection_start_cy = start_r;
+        E.selection_start_cx = start_c;
+        E.selection_end_cy = end_r;
+        E.selection_end_cx = end_c;
+        E.selection_active = 1;
+        E.mode = SELECTION_MODE;
+        editorSetStatusMessage("Selected inside %c%c (multi-line)", best_open, best_close);
+        return;
+    }
+
+    // Try multi-line quotes (' and ")
+    int q_or = -1, q_oc = -1, q_cr = -1, q_cc = -1; char q_char = 0;
+    int q_probe_r = cur_r, q_probe_c = cur_c;
+    while (find_prev_unescaped_quote(q_probe_r, q_probe_c, &q_probe_r, &q_probe_c, &q_char)) {
+        int mr, mc;
+        if (find_matching_quote_across(q_probe_r, q_probe_c, q_char, &mr, &mc)) {
+            int inside_left = (pos_cmp(q_probe_r, q_probe_c, cur_r, cur_c) < 0);
+            int inside_right = (pos_cmp(cur_r, cur_c, mr, mc) <= 0);
+            if (inside_left && inside_right && !(q_probe_r == mr && mc - q_probe_c <= 1)) {
+                if (q_or == -1 || pos_cmp(q_or, q_oc, q_probe_r, q_probe_c) < 0) {
+                    q_or = q_probe_r; q_oc = q_probe_c; q_cr = mr; q_cc = mc;
+                }
+            }
+        }
+        // continue leftwards
+    }
+    if (q_or != -1) {
+        // Trim quote-only lines
+        int start_r = q_or, start_c = q_oc + 1;
+        int end_r = q_cr, end_c = q_cc;
+
+        if (line_is_only_delim(q_or, q_oc, q_char)) {
+            start_r = q_or + 1;
+            start_c = 0;
+        }
+        if (line_is_only_delim(q_cr, q_cc, q_char)) {
+            end_r = q_cr - 1;
+            end_c = (end_r >= 0 && end_r < E.numrows) ? E.row[end_r].size : 0;
+        }
+
+        if (start_r > end_r || (start_r == end_r && start_c >= end_c)) {
+            editorSetStatusMessage("Nothing inside quotes");
+            return;
+        }
+
+        E.selection_start_cy = start_r;
+        E.selection_start_cx = start_c;
+        E.selection_end_cy = end_r;
+        E.selection_end_cx = end_c;
+        E.selection_active = 1;
+        E.mode = SELECTION_MODE;
+        editorSetStatusMessage("Selected inside %c%c (multi-line)", q_char, q_char);
+        return;
+    }
+
+    // Fallback to previous single-line behavior including quotes
     if (E.cy >= E.numrows) {
         editorSetStatusMessage("No line to operate on");
         return;
@@ -3253,7 +3503,7 @@ void editorShowHelp() {
         "Ctrl-A: Select All",
         "Alt-R : Select Row",
         "Shift-Arrows : Rapid Selection / Press ESC to enter in SEL. MODE",
-        "Shift-Tab :    Select text between brachets",
+        "Shift-Tab :    Smart elect text between brachets",
         "-- Selection Mode --",
         "ESC (in Sel. Mode): Cancel Selection",
         "Ctrl-W (in Sel. Mode): Copy Selection",
