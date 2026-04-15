@@ -19,11 +19,13 @@
 #include <termios.h>
 #include <time.h>
 #include <unistd.h>
+#include <wchar.h>
+#include <locale.h>
 #include "cJSON.h"
 
 /* defines */
 
-#define WEE_VERSION "0.92.1"
+#define WEE_VERSION "0.94"
 #define WEE_TAB_STOP 4
 #define WEE_QUIT_TIMES 2
 #define UNDO_BUFFER_SIZE 10
@@ -78,6 +80,7 @@ struct editorSyntax {
   int flags;
 };
 
+
 typedef struct erow {
   int idx;
   int size;
@@ -88,37 +91,39 @@ typedef struct erow {
   int hl_open_comment;
 } erow;
 
-/* Struttura per salvare lo stato completo dell'editor */
-struct EditorSnapshot {
-    // Contenuto del file
-    erow *rows;
-    int numrows;
-    
-    // Posizione cursore
-    int cx, cy;
-    int rowoff, coloff;
-    
-    // Stato selezione
-    int selection_active;
-    int selection_start_cx, selection_start_cy;
-    int selection_end_cx, selection_end_cy;
-    
-    // Metadati
-    time_t timestamp;
-    char *description;
-    
-    // Lista doppia per navigazione
-    struct EditorSnapshot *prev;
-    struct EditorSnapshot *next;
+/* Sistema undo/redo incrementale */
+typedef enum {
+    UNDO_INSERT_CHAR,
+    UNDO_DELETE_CHAR,
+    UNDO_INSERT_ROW,
+    UNDO_DELETE_ROW,
+    UNDO_INSERT_TEXT,
+    UNDO_DELETE_TEXT
+} UndoActionType;
+
+struct UndoAction {
+    UndoActionType type;
+    int y, x;
+    char *data;      /* Testo inserito o riga */
+    char *old_data;  /* Testo rimosso o riga precedente */
+    struct UndoAction *next;
 };
 
-/* Sistema undo/redo basato su snapshot */
+struct UndoStep {
+    struct UndoAction *actions;
+    int cursor_before_x, cursor_before_y;
+    int cursor_after_x, cursor_after_y;
+    char *description;
+    struct UndoStep *prev;
+    struct UndoStep *next;
+};
+
 struct UndoSystem {
-    struct EditorSnapshot *current;
-    struct EditorSnapshot *head;
-    int max_snapshots;
+    struct UndoStep *current;
+    struct UndoStep *head;
+    int max_steps;
     int current_count;
-    time_t last_snapshot_time;
+    time_t last_action_time;
 };
 
 struct editorConfig {
@@ -148,6 +153,7 @@ struct editorConfig {
   int selection_end_cy;
   int selection_active;
   int mode;
+  int is_undoing;
   struct UndoSystem undo_system;
 };
 
@@ -195,11 +201,10 @@ int editorCanMoveSelectionVertical();
 void editorJumpToLine();
 void editorUndo();
 void editorRedo();
-void editorCreateSnapshot(const char *description);
-void editorFreeSnapshot(struct EditorSnapshot *snap);
+void editorStartUndoStep(const char *description);
+void editorAddUndoAction(UndoActionType type, int y, int x, const char *data, const char *old_data);
+void editorFreeUndoStep(struct UndoStep *step);
 void editorClearUndoSystem();
-struct EditorSnapshot* editorCopyCurrentState(const char *description);
-void editorRestoreSnapshot(struct EditorSnapshot *snap);
 void editorSelectRowText();
 void editorSelectInsideDelims();
 int findMatchingRightInLine(erow *row, int start_idx, char open_ch, char close_ch);
@@ -349,39 +354,81 @@ int getWindowSize(int *rows, int *cols) {
 /* row operations */
 
 /**
- * @brief Converts the cursor position (cx) from character index to render index (rx).
- *        Takes tab characters into account.
- * @param row The text row.
- * @param cx The cursor position based on characters.
- * @return The cursor position based on rendering.
+ * @brief Restituisce la lunghezza in byte del carattere UTF-8.
+ */
+int editorUtf8CharLen(char c) {
+  if ((unsigned char)c < 0x80) return 1;
+  if (((unsigned char)c & 0xe0) == 0xc0) return 2;
+  if (((unsigned char)c & 0xf0) == 0xe0) return 3;
+  if (((unsigned char)c & 0xf8) == 0xf0) return 4;
+  return 1;
+}
+
+/**
+ * @brief Converts the cursor position (cx) from byte index to render column (rx).
  */
 int editorRowCxToRx(erow *row, int cx) {
   int rx = 0;
-  for (int j = 0; j < cx; j++) {
-    if (row->chars[j] == '\t')
+  int j = 0;
+  mbstate_t state;
+  memset(&state, 0, sizeof(state));
+
+  while (j < cx && j < row->size) {
+    if (row->chars[j] == '\t') {
       rx += (WEE_TAB_STOP - 1) - (rx % WEE_TAB_STOP);
-    rx++;
+      rx++;
+      j++;
+    } else {
+      wchar_t wc;
+      size_t len = mbrtowc(&wc, &row->chars[j], row->size - j, &state);
+      if (len == (size_t)-1 || len == (size_t)-2 || len == 0) {
+        rx++;
+        j++;
+        memset(&state, 0, sizeof(state));
+      } else {
+        int width = wcwidth(wc);
+        if (width < 0) width = 1;
+        rx += width;
+        j += len;
+      }
+    }
   }
   return rx;
 }
 
 /**
- * @brief Converts the cursor position (rx) from render index to character index (cx).
- *        This is the inverse operation of editorRowCxToRx.
- * @param row The text row.
- * @param rx The cursor position based on rendering.
- * @return The cursor position based on characters.
+ * @brief Converts the render column (rx) to byte index (cx).
  */
 int editorRowRxToCx(erow *row, int rx) {
   int cur_rx = 0;
-  int cx;
-  for (cx = 0; cx < row->size; cx++) {
-    if (row->chars[cx] == '\t')
-      cur_rx += (WEE_TAB_STOP - 1) - (cur_rx % WEE_TAB_STOP);
-    cur_rx++;
-    if (cur_rx > rx) return cx;
+  int j = 0;
+  mbstate_t state;
+  memset(&state, 0, sizeof(state));
+
+  while (j < row->size) {
+    if (row->chars[j] == '\t') {
+      int tab_width = (WEE_TAB_STOP - 1) - (cur_rx % WEE_TAB_STOP) + 1;
+      if (cur_rx + tab_width > rx) return j;
+      cur_rx += tab_width;
+      j++;
+    } else {
+      wchar_t wc;
+      size_t len = mbrtowc(&wc, &row->chars[j], row->size - j, &state);
+      if (len == (size_t)-1 || len == (size_t)-2 || len == 0) {
+        if (cur_rx + 1 > rx) return j;
+        cur_rx++;
+        j++;
+        memset(&state, 0, sizeof(state));
+      } else {
+        int width = wcwidth(wc);
+        if (width < 0) width = 1;
+        if (cur_rx + width > rx) return j;
+        cur_rx += width;
+        j += len;
+      }
+    }
   }
-  return cx;
+  return j;
 }
 
 /**
@@ -418,6 +465,10 @@ void editorUpdateRow(erow *row) {
  */
 void editorInsertRow(int at, char *s, size_t len) {
   if (at < 0 || at > E.numrows) return;
+
+  if (!E.is_undoing && E.undo_system.current) {
+    editorAddUndoAction(UNDO_INSERT_ROW, at, 0, s, NULL);
+  }
 
   E.row = realloc(E.row, sizeof(erow) * (E.numrows + 1));
   memmove(&E.row[at + 1], &E.row[at], sizeof(erow) * (E.numrows - at));
@@ -457,11 +508,10 @@ void editorFreeRow(erow *row) {
 void editorDelRow(int at) {
   if (at < 0 || at >= E.numrows) return;
   erow *row = &E.row[at];
-  char *deleted_text = malloc(row->size + 2);
-  memcpy(deleted_text, row->chars, row->size);
-  deleted_text[row->size] = '\n';
-  deleted_text[row->size + 1] = '\0';
-  // Lo snapshot sarà gestito dal chiamante
+
+  if (!E.is_undoing && E.undo_system.current) {
+    editorAddUndoAction(UNDO_DELETE_ROW, at, 0, NULL, row->chars);
+  }
 
   editorFreeRow(&E.row[at]);
   memmove(&E.row[at], &E.row[at + 1], sizeof(erow) * (E.numrows - at - 1));
@@ -478,6 +528,12 @@ void editorDelRow(int at) {
  */
 void editorRowInsertChar(erow *row, int at, int c) {
   if (at < 0 || at > row->size) at = row->size;
+
+  if (!E.is_undoing && E.undo_system.current) {
+    char data[2] = {(char)c, 0};
+    editorAddUndoAction(UNDO_INSERT_CHAR, row->idx, at, data, NULL);
+  }
+
   row->chars = realloc(row->chars, row->size + 2);
   memmove(&row->chars[at + 1], &row->chars[at], row->size - at + 1);
   row->size++;
@@ -487,18 +543,48 @@ void editorRowInsertChar(erow *row, int at, int c) {
 }
 
 /**
- * @brief Appends a string to the end of a row.
- * @param row The row to append the string to.
- * @param s The string to append.
- * @param len The length of the string.
+ * @brief Inserts a string into a row at a specific position.
  */
-void editorRowAppendString(erow *row, char *s, size_t len) {
+void editorRowInsertText(erow *row, int at, const char *s, size_t len) {
+  if (at < 0 || at > row->size) at = row->size;
+  
+  if (!E.is_undoing && E.undo_system.current) {
+    editorAddUndoAction(UNDO_INSERT_TEXT, row->idx, at, s, NULL);
+  }
+
   row->chars = realloc(row->chars, row->size + len + 1);
-  memcpy(&row->chars[row->size], s, len);
+  memmove(&row->chars[at + len], &row->chars[at], row->size - at + 1);
+  memcpy(&row->chars[at], s, len);
   row->size += len;
-  row->chars[row->size] = '\0';
   editorUpdateRow(row);
   E.dirty++;
+}
+
+/**
+ * @brief Deletes a range of characters from a row.
+ */
+void editorRowDelText(erow *row, int at, size_t len) {
+  if (at < 0 || (size_t)at + len > (size_t)row->size) return;
+
+  if (!E.is_undoing && E.undo_system.current) {
+    char *deleted = malloc(len + 1);
+    memcpy(deleted, &row->chars[at], len);
+    deleted[len] = '\0';
+    editorAddUndoAction(UNDO_DELETE_TEXT, row->idx, at, NULL, deleted);
+    free(deleted);
+  }
+
+  memmove(&row->chars[at], &row->chars[at + len], row->size - (at + len) + 1);
+  row->size -= len;
+  editorUpdateRow(row);
+  E.dirty++;
+}
+
+/**
+ * @brief Appends a string to the end of a row.
+ */
+void editorRowAppendString(erow *row, char *s, size_t len) {
+  editorRowInsertText(row, row->size, s, len);
 }
 
 /**
@@ -508,6 +594,12 @@ void editorRowAppendString(erow *row, char *s, size_t len) {
  */
 void editorRowDelChar(erow *row, int at) {
   if (at < 0 || at >= row->size) return;
+
+  if (!E.is_undoing && E.undo_system.current) {
+    char data[2] = {row->chars[at], 0};
+    editorAddUndoAction(UNDO_DELETE_CHAR, row->idx, at, NULL, data);
+  }
+
   memmove(&row->chars[at], &row->chars[at + 1], row->size - at);
   row->size--;
   editorUpdateRow(row);
@@ -558,8 +650,7 @@ void editorInsertNewline() {
     erow *row = &E.row[E.cy];
     editorInsertRow(E.cy + 1, &row->chars[E.cx], row->size - E.cx);
     row = &E.row[E.cy];
-    row->size = E.cx;
-    editorUpdateRow(row);
+    editorRowDelText(row, E.cx, row->size - E.cx);
   }
   E.cy++;
   E.cx = 0;
@@ -665,8 +756,7 @@ void editorDelCharSelection() {
   }
 
   erow *start_row = &E.row[start_cy];
-  start_row->size = start_cx;
-  editorUpdateRow(start_row);
+  editorRowDelText(start_row, start_cx, start_row->size - start_cx);
   editorSetStatusMessage("editorDelCharSelection: Start row truncated. New size: %d", start_row->size);
 
   for (int i = end_cy; i > start_cy; i--) {
@@ -693,8 +783,11 @@ void editorDelChar() {
   if (E.cx == 0 && E.cy == 0) return;
   erow *row = &E.row[E.cy];
   if (E.cx > 0) {
-    editorRowDelChar(row, E.cx - 1);
-    E.cx--;
+    int start = E.cx - 1;
+    while (start > 0 && (row->chars[start] & 0xc0) == 0x80) start--;
+    int len = E.cx - start;
+    editorRowDelText(row, start, len);
+    E.cx = start;
   }
   else {
     E.cx = E.row[E.cy - 1].size;
@@ -1024,30 +1117,36 @@ void editorPaste() {
     editorDelCharSelection();
   }
 
-  // Lo snapshot sarà gestito dal chiamante
-
   int paste_start_cx = E.cx;
   int paste_start_cy = E.cy;
 
-  for (int i = 0; i < E.clipboard_len; i++) {
-    if (E.clipboard[i] == '\n') {
-        if (E.cx == 0) {
-            editorInsertRow(E.cy, "", 0);
-        } else {
-            erow *row = &E.row[E.cy];
-            editorInsertRow(E.cy + 1, &row->chars[E.cx], row->size - E.cx);
-            row = &E.row[E.cy];
-            row->size = E.cx;
-            editorUpdateRow(row);
-        }
-        E.cy++;
-        E.cx = 0;
-    } else {
-      if (E.cy == E.numrows) {
-        editorInsertRow(E.numrows, "", 0);
-      }
-      editorRowInsertChar(&E.row[E.cy], E.cx, E.clipboard[i]);
-      E.cx++;
+  int i = 0;
+  while (i < E.clipboard_len) {
+    int start = i;
+    while (i < E.clipboard_len && E.clipboard[i] != '\n') i++;
+    int len = i - start;
+
+    if (len > 0) {
+      if (E.cy == E.numrows) editorInsertRow(E.numrows, "", 0);
+      editorRowInsertText(&E.row[E.cy], E.cx, &E.clipboard[start], len);
+      E.cx += len;
+    }
+
+    if (i < E.clipboard_len && E.clipboard[i] == '\n') {
+      if (E.cy == E.numrows) editorInsertRow(E.numrows, "", 0);
+      erow *row = &E.row[E.cy];
+      
+      // Crea la nuova riga con il contenuto rimanente dopo il cursore
+      editorInsertRow(E.cy + 1, &row->chars[E.cx], row->size - E.cx);
+      
+      // Riassegna row dopo il realloc potenziale di editorInsertRow
+      row = &E.row[E.cy];
+      // Tronca la riga corrente
+      editorRowDelText(row, E.cx, row->size - E.cx);
+      
+      E.cy++;
+      E.cx = 0;
+      i++;
     }
   }
 
@@ -1452,7 +1551,7 @@ void editorFindCallback(char *query, int key) {
     editorRefreshScreen();
     int confirm = editorReadKey();
     if (confirm == 'y' || confirm == 'Y') {
-      editorCreateSnapshot("Replace all");
+      editorStartUndoStep("Replace all");
       int replaced = editorReplaceAllInBuffer(query, repl);
       editorDeselectSelection();
       editorSetStatusMessage("Replaced %d occurrence(s). Press ESC to close search.", replaced);
@@ -1837,12 +1936,23 @@ void editorMoveCursor(int key) {
   erow *row = (E.cy >= E.numrows) ? NULL : &E.row[E.cy];
   switch (key) {
     case ARROW_LEFT:
-      if (E.cx != 0) E.cx--;
-      else if (E.cy > 0) { E.cy--; E.cx = E.row[E.cy].size; }
+      if (E.cx != 0) {
+        // Sposta a sinistra di un carattere UTF-8
+        E.cx--;
+        while (E.cx > 0 && (E.row[E.cy].chars[E.cx] & 0xc0) == 0x80) E.cx--;
+      } else if (E.cy > 0) {
+        E.cy--;
+        E.cx = E.row[E.cy].size;
+      }
       break;
     case ARROW_RIGHT:
-      if (row && E.cx < row->size) E.cx++;
-      else if (row && E.cx == row->size) { E.cy++; E.cx = 0; }
+      if (row && E.cx < row->size) {
+        // Sposta a destra di un carattere UTF-8
+        E.cx += editorUtf8CharLen(row->chars[E.cx]);
+      } else if (row && E.cx == row->size) {
+        E.cy++;
+        E.cx = 0;
+      }
       break;
     case ARROW_UP:
       if (E.cy != 0) E.cy--;
@@ -1878,7 +1988,7 @@ void editorProcessKeypress() {
         editorUnindentSelection();
         break;
       case DEL_KEY: // Delete selection
-        editorCreateSnapshot("Delete selection");
+        editorStartUndoStep("Delete selection");
         editorDelCharSelection();
         E.mode = NORMAL_MODE;
         editorSetStatusMessage("Selection deleted.");
@@ -1898,7 +2008,7 @@ void editorProcessKeypress() {
         break;
       case CTRL_KEY('k'): // Cut selection
         editorSetStatusMessage("Mode: SELECTION_MODE. Cutting selection.");
-        editorCreateSnapshot("Cut selection");
+        editorStartUndoStep("Cut selection");
         editorCutSelection();
         E.mode = NORMAL_MODE;
         editorSetStatusMessage("Selection cut.");
@@ -1909,7 +2019,7 @@ void editorProcessKeypress() {
         break;
       default:
         if (!iscntrl(c) && c < 128) { // Check if it's a printable ASCII character
-          editorCreateSnapshot("Replace selection");
+          editorStartUndoStep("Replace selection");
           editorDelCharSelection(); // Delete the selected text (sets E.selection_active = 0)
           editorInsertChar(c);      // Insert the new character
           E.mode = NORMAL_MODE;     // Exit selection mode
@@ -1921,7 +2031,7 @@ void editorProcessKeypress() {
   } else { // NORMAL_MODE
     switch (c) {
       case '\r': 
-        editorCreateSnapshot("Insert newline");
+        editorStartUndoStep("Insert newline");
         editorInsertNewline(); 
         break;
       case '\t':
@@ -1947,18 +2057,18 @@ void editorProcessKeypress() {
       case CTRL_KEY('k'):
         if (E.selection_active) { // If a selection is active, cut the selection
           editorSetStatusMessage("Mode: NORMAL_MODE. Selection active. Cutting selection.");
-          editorCreateSnapshot("Cut selection");
+          editorStartUndoStep("Cut selection");
           editorCutSelection();
           E.mode = NORMAL_MODE; // Exit selection mode after cutting
           editorSetStatusMessage("Selection cut.");
         } else { // Otherwise, cut the current line
           editorSetStatusMessage("Mode: NORMAL_MODE. No selection active. Cutting line.");
-          editorCreateSnapshot("Cut line");
+          editorStartUndoStep("Cut line");
           editorCutLine();
         }
         break;
       case CTRL_KEY('u'): 
-        editorCreateSnapshot("Paste");
+        editorStartUndoStep("Paste");
         editorPaste(); 
         break;
       case CTRL_KEY('n'): E.linenumbers = !E.linenumbers; break;
@@ -2002,7 +2112,7 @@ void editorProcessKeypress() {
             break; // Non eseguire la cancellazione standard del carattere
           }
         }
-        editorCreateSnapshot("Delete character");
+        editorStartUndoStep("Delete character");
         if (c == DEL_KEY) editorMoveCursor(ARROW_RIGHT);
         editorDelChar();
         break;
@@ -2087,7 +2197,7 @@ void editorProcessKeypress() {
       default:
         if (E.selection_active && !iscntrl(c) && c < 128) { // If a selection is active (Ctrl+B pressed, but not Ctrl+E) and a printable char is typed
           editorSetStatusMessage("Selection cancelled (typed character). Deleting selection.");
-          editorCreateSnapshot("Replace selection");
+          editorStartUndoStep("Replace selection");
           editorDelCharSelection(); // Delete the selected text
           editorInsertChar(c);      // Insert the new character
           E.mode = NORMAL_MODE;     // Exit selection mode
@@ -2098,7 +2208,7 @@ void editorProcessKeypress() {
             static time_t last_typing_time = 0;
             time_t now = time(NULL);
             if (now - last_typing_time > 2) { // Nuova sessione di typing
-                editorCreateSnapshot("Typing");
+                editorStartUndoStep("Typing");
             }
             last_typing_time = now;
             editorInsertChar(c);
@@ -2107,6 +2217,10 @@ void editorProcessKeypress() {
     }
   }
   quit_times = WEE_QUIT_TIMES;
+  if (E.undo_system.current) {
+    E.undo_system.current->cursor_after_x = E.cx;
+    E.undo_system.current->cursor_after_y = E.cy;
+  }
 }
 
 void editorIndentSelection() {
@@ -2547,217 +2661,205 @@ void editorJumpToLine() {
   editorSetStatusMessage("Jumped to line %d.", target_line);
 }
 
-/* Nuovo sistema Undo/Redo basato su snapshot */
-
 /**
- * @brief Crea una copia profonda di una riga
+ * @brief Implementazione del sistema di Undo/Redo incrementale.
  */
-erow* editorCopyRow(erow *src) {
-    erow *dst = malloc(sizeof(erow));
-    dst->idx = src->idx;
-    dst->size = src->size;
-    dst->chars = malloc(src->size + 1);
-    memcpy(dst->chars, src->chars, src->size + 1);
-    
-    dst->rsize = src->rsize;
-    dst->render = malloc(src->rsize + 1);
-    memcpy(dst->render, src->render, src->rsize + 1);
-    
-    dst->hl = malloc(src->rsize);
-    memcpy(dst->hl, src->hl, src->rsize);
-    
-    dst->hl_open_comment = src->hl_open_comment;
-    return dst;
+
+void editorFreeUndoStep(struct UndoStep *step) {
+    if (!step) return;
+    struct UndoAction *action = step->actions;
+    while (action) {
+        struct UndoAction *next = action->next;
+        free(action->data);
+        free(action->old_data);
+        free(action);
+        action = next;
+    }
+    free(step->description);
+    free(step);
 }
 
-/**
- * @brief Crea uno snapshot dello stato attuale dell'editor
- */
-struct EditorSnapshot* editorCopyCurrentState(const char *description) {
-    struct EditorSnapshot *snap = malloc(sizeof(struct EditorSnapshot));
-    
-    // Copia il contenuto del file
-    snap->numrows = E.numrows;
-    if (E.numrows > 0) {
-        snap->rows = malloc(sizeof(erow) * E.numrows);
-        for (int i = 0; i < E.numrows; i++) {
-            snap->rows[i] = *editorCopyRow(&E.row[i]);
-        }
-    } else {
-        snap->rows = NULL;
-    }
-    
-    // Copia posizione cursore
-    snap->cx = E.cx;
-    snap->cy = E.cy;
-    snap->rowoff = E.rowoff;
-    snap->coloff = E.coloff;
-    
-    // Copia stato selezione
-    snap->selection_active = E.selection_active;
-    snap->selection_start_cx = E.selection_start_cx;
-    snap->selection_start_cy = E.selection_start_cy;
-    snap->selection_end_cx = E.selection_end_cx;
-    snap->selection_end_cy = E.selection_end_cy;
-    
-    // Metadati
-    snap->timestamp = time(NULL);
-    snap->description = strdup(description);
-    snap->prev = NULL;
-    snap->next = NULL;
-    
-    return snap;
-}
-
-/**
- * @brief Libera la memoria di uno snapshot
- */
-void editorFreeSnapshot(struct EditorSnapshot *snap) {
-    if (!snap) return;
-    
-    if (snap->rows) {
-        for (int i = 0; i < snap->numrows; i++) {
-            editorFreeRow(&snap->rows[i]);
-        }
-        free(snap->rows);
-    }
-    
-    free(snap->description);
-    free(snap);
-}
-
-/**
- * @brief Ripristina lo stato dell'editor da uno snapshot
- */
-void editorRestoreSnapshot(struct EditorSnapshot *snap) {
-    if (!snap) return;
-    
-    // Libera il contenuto attuale
-    for (int i = 0; i < E.numrows; i++) {
-        editorFreeRow(&E.row[i]);
-    }
-    free(E.row);
-    
-    // Ripristina il contenuto
-    E.numrows = snap->numrows;
-    if (snap->numrows > 0) {
-        E.row = malloc(sizeof(erow) * snap->numrows);
-        for (int i = 0; i < snap->numrows; i++) {
-            E.row[i] = *editorCopyRow(&snap->rows[i]);
-        }
-    } else {
-        E.row = NULL;
-    }
-    
-    // Ripristina posizione cursore
-    E.cx = snap->cx;
-    E.cy = snap->cy;
-    E.rowoff = snap->rowoff;
-    E.coloff = snap->coloff;
-    
-    // Ripristina stato selezione
-    E.selection_active = snap->selection_active;
-    E.selection_start_cx = snap->selection_start_cx;
-    E.selection_start_cy = snap->selection_start_cy;
-    E.selection_end_cx = snap->selection_end_cx;
-    E.selection_end_cy = snap->selection_end_cy;
-    
-    E.dirty++;
-}
-
-/**
- * @brief Crea uno snapshot prima di un'operazione
- */
-void editorCreateSnapshot(const char *description) {
-    time_t now = time(NULL);
-    
-    // Evita snapshot troppo frequenti (meno di 1 secondo)
-    if (now - E.undo_system.last_snapshot_time < 1 && E.undo_system.current) {
-        return;
-    }
-    
-    struct EditorSnapshot *snap = editorCopyCurrentState(description);
-    
-    if (E.undo_system.current) {
-        // Rimuovi tutto ciò che segue il punto attuale (per gestire il branching)
-        struct EditorSnapshot *next = E.undo_system.current->next;
-        while (next) {
-            struct EditorSnapshot *temp = next->next;
-            editorFreeSnapshot(next);
-            next = temp;
-            E.undo_system.current_count--;
-        }
-        
-        // Aggiungi il nuovo snapshot
-        E.undo_system.current->next = snap;
-        snap->prev = E.undo_system.current;
-    } else {
-        // Primo snapshot
-        E.undo_system.head = snap;
-    }
-    
-    E.undo_system.current = snap;
-    E.undo_system.current_count++;
-    E.undo_system.last_snapshot_time = now;
-    
-    // Gestisci il limite di snapshot
-    if (E.undo_system.current_count > E.undo_system.max_snapshots) {
-        // Rimuovi il primo snapshot
-        struct EditorSnapshot *old_head = E.undo_system.head;
-        E.undo_system.head = old_head->next;
-        if (E.undo_system.head) {
-            E.undo_system.head->prev = NULL;
-        }
-        editorFreeSnapshot(old_head);
-        E.undo_system.current_count--;
-    }
-}
-
-/**
- * @brief Pulisce tutto il sistema undo
- */
 void editorClearUndoSystem() {
-    struct EditorSnapshot *current = E.undo_system.head;
+    struct UndoStep *current = E.undo_system.head;
     while (current) {
-        struct EditorSnapshot *next = current->next;
-        editorFreeSnapshot(current);
+        struct UndoStep *next = current->next;
+        editorFreeUndoStep(current);
         current = next;
     }
-    
     E.undo_system.head = NULL;
     E.undo_system.current = NULL;
     E.undo_system.current_count = 0;
-    E.undo_system.last_snapshot_time = 0;
 }
 
-/**
- * @brief Funzione Undo - torna al snapshot precedente
- */
+void editorStartUndoStep(const char *description) {
+    if (E.is_undoing) return;
+
+    // Pulisce la cronologia di redo se siamo in un nuovo ramo
+    struct UndoStep *next = E.undo_system.current ? E.undo_system.current->next : E.undo_system.head;
+    if (E.undo_system.current == NULL && E.undo_system.head != NULL) next = E.undo_system.head;
+    else if (E.undo_system.current != NULL) next = E.undo_system.current->next;
+    else next = NULL;
+
+    while (next) {
+        struct UndoStep *temp = next->next;
+        editorFreeUndoStep(next);
+        next = temp;
+        E.undo_system.current_count--;
+    }
+    if (E.undo_system.current) E.undo_system.current->next = NULL;
+    else E.undo_system.head = NULL;
+
+    struct UndoStep *step = malloc(sizeof(struct UndoStep));
+    step->actions = NULL;
+    step->description = strdup(description);
+    step->cursor_before_x = E.cx;
+    step->cursor_before_y = E.cy;
+    step->prev = E.undo_system.current;
+    step->next = NULL;
+
+    if (E.undo_system.current) {
+        E.undo_system.current->next = step;
+    } else {
+        E.undo_system.head = step;
+    }
+    E.undo_system.current = step;
+    E.undo_system.current_count++;
+
+    if (E.undo_system.current_count > E.undo_system.max_steps) {
+        struct UndoStep *old_head = E.undo_system.head;
+        E.undo_system.head = old_head->next;
+        if (E.undo_system.head) E.undo_system.head->prev = NULL;
+        editorFreeUndoStep(old_head);
+        E.undo_system.current_count--;
+    }
+    E.undo_system.last_action_time = time(NULL);
+}
+
+void editorAddUndoAction(UndoActionType type, int y, int x, const char *data, const char *old_data) {
+    if (E.is_undoing || !E.undo_system.current) return;
+
+    struct UndoAction *action = malloc(sizeof(struct UndoAction));
+    action->type = type;
+    action->y = y;
+    action->x = x;
+    action->data = data ? strdup(data) : NULL;
+    action->old_data = old_data ? strdup(old_data) : NULL;
+    action->next = E.undo_system.current->actions;
+    E.undo_system.current->actions = action;
+
+    // Aggiorna la posizione finale del cursore per questo passo
+    E.undo_system.current->cursor_after_x = E.cx;
+    E.undo_system.current->cursor_after_y = E.cy;
+}
+
+void editorApplyAction(struct UndoAction *action, int undo) {
+    if (!action) return;
+
+    if (undo) {
+        switch (action->type) {
+            case UNDO_INSERT_CHAR:
+                editorRowDelChar(&E.row[action->y], action->x);
+                break;
+            case UNDO_DELETE_CHAR:
+                editorRowInsertChar(&E.row[action->y], action->x, action->old_data[0]);
+                break;
+            case UNDO_INSERT_ROW:
+                editorDelRow(action->y);
+                break;
+            case UNDO_DELETE_ROW:
+                editorInsertRow(action->y, action->old_data, strlen(action->old_data));
+                break;
+            case UNDO_INSERT_TEXT:
+                editorRowDelText(&E.row[action->y], action->x, strlen(action->data));
+                break;
+            case UNDO_DELETE_TEXT:
+                editorRowInsertText(&E.row[action->y], action->x, action->old_data, strlen(action->old_data));
+                break;
+        }
+    } else {
+        switch (action->type) {
+            case UNDO_INSERT_CHAR:
+                editorRowInsertChar(&E.row[action->y], action->x, action->data[0]);
+                break;
+            case UNDO_DELETE_CHAR:
+                editorRowDelChar(&E.row[action->y], action->x);
+                break;
+            case UNDO_INSERT_ROW:
+                editorInsertRow(action->y, action->data, strlen(action->data));
+                break;
+            case UNDO_DELETE_ROW:
+                editorDelRow(action->y);
+                break;
+            case UNDO_INSERT_TEXT:
+                editorRowInsertText(&E.row[action->y], action->x, action->data, strlen(action->data));
+                break;
+            case UNDO_DELETE_TEXT:
+                editorRowDelText(&E.row[action->y], action->x, strlen(action->old_data));
+                break;
+        }
+    }
+}
+
 void editorUndo() {
-    if (!E.undo_system.current || !E.undo_system.current->prev) {
+    if (!E.undo_system.current) {
         editorSetStatusMessage("Nothing to undo");
         return;
     }
-    
+
+    E.is_undoing = 1;
+    struct UndoAction *action = E.undo_system.current->actions;
+    while (action) {
+        editorApplyAction(action, 1);
+        action = action->next;
+    }
+
+    E.cx = E.undo_system.current->cursor_before_x;
+    E.cy = E.undo_system.current->cursor_before_y;
+
     E.undo_system.current = E.undo_system.current->prev;
-    editorRestoreSnapshot(E.undo_system.current);
-    editorSetStatusMessage("Undo: %s", E.undo_system.current->description);
+    E.is_undoing = 0;
+    E.dirty++;
+    editorSetStatusMessage("Undo: %s", E.undo_system.current ? E.undo_system.current->next->description : E.undo_system.head->description);
 }
 
-/**
- * @brief Funzione Redo - va al snapshot successivo
- */
 void editorRedo() {
-    if (!E.undo_system.current || !E.undo_system.current->next) {
+    struct UndoStep *step = NULL;
+    if (E.undo_system.current == NULL) step = E.undo_system.head;
+    else step = E.undo_system.current->next;
+
+    if (!step) {
         editorSetStatusMessage("Nothing to redo");
         return;
     }
-    
-    E.undo_system.current = E.undo_system.current->next;
-    editorRestoreSnapshot(E.undo_system.current);
-    editorSetStatusMessage("Redo: %s", E.undo_system.current->description);
-}
 
+    E.is_undoing = 1;
+    // Le azioni nel passo sono memorizzate in ordine inverso (stack).
+    // Per il Redo dobbiamo applicarle nell'ordine originale.
+    // Invertiamo temporaneamente la lista o usiamo un array.
+    int count = 0;
+    struct UndoAction *a = step->actions;
+    while (a) { count++; a = a->next; }
+
+    struct UndoAction **arr = malloc(sizeof(struct UndoAction*) * count);
+    a = step->actions;
+    for (int i = count - 1; i >= 0; i--) {
+        arr[i] = a;
+        a = a->next;
+    }
+
+    for (int i = 0; i < count; i++) {
+        editorApplyAction(arr[i], 0);
+    }
+    free(arr);
+
+    E.cx = step->cursor_after_x;
+    E.cy = step->cursor_after_y;
+
+    E.undo_system.current = step;
+    E.is_undoing = 0;
+    E.dirty++;
+    editorSetStatusMessage("Redo: %s", step->description);
+}
 /**
  * @brief Seleziona automaticamente il testo della riga corrente
  *        dalla prima lettera all'ultima, ignorando spazi iniziali e finali
@@ -3567,13 +3669,14 @@ void initEditor() {
   E.selection_end_cy = -1;
   E.selection_active = 0;
   E.mode = NORMAL_MODE;
+  E.is_undoing = 0;
 
   // Inizializza sistema undo
   E.undo_system.head = NULL;
   E.undo_system.current = NULL;
-  E.undo_system.max_snapshots = 50;
+  E.undo_system.max_steps = 100;
   E.undo_system.current_count = 0;
-  E.undo_system.last_snapshot_time = 0;
+  E.undo_system.last_action_time = 0;
 
   if (getWindowSize(&E.screenrows, &E.screencols) == -1) die("getWindowSize");
   E.screenrows -= 2;
@@ -3629,6 +3732,7 @@ void printHelp() {
  * @return 0 on success, 1 on error.
  */
 int main(int argc, char *argv[]) {
+  setlocale(LC_ALL, "");
   if (argc == 2) {
     if (strcmp(argv[1], "--version") == 0 || strcmp(argv[1], "-v") == 0) {
       printf("Wee Editor -  by anidisc 'wee.anidisc.it '  -- version %s\n", WEE_VERSION);
