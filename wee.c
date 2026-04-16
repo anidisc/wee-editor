@@ -25,7 +25,7 @@
 
 /* defines */
 
-#define WEE_VERSION "0.94"
+#define WEE_VERSION "0.95"
 #define WEE_TAB_STOP 4
 #define WEE_QUIT_TIMES 2
 #define UNDO_BUFFER_SIZE 10
@@ -125,6 +125,28 @@ struct UndoSystem {
     int current_count;
     time_t last_action_time;
 };
+typedef struct Piece {
+    int source;     /* 0: Original, 1: Add */
+    size_t start;
+    size_t length;
+    struct Piece *prev;
+    struct Piece *next;
+} Piece;
+
+typedef struct {
+    char *original_buffer;
+    size_t original_size;
+    char *add_buffer;
+    size_t add_size;
+    size_t add_capacity;
+    Piece *head;
+} PieceTable;
+
+typedef struct {
+    size_t *offsets;
+    int count;
+    int capacity;
+} LineIndex;
 
 struct editorConfig {
   int cx, cy;
@@ -135,6 +157,8 @@ struct editorConfig {
   int screencols;
   int numrows;
   erow *row;
+  PieceTable table;
+  LineIndex index;
   char *filename;
   char statusmsg[256];
   time_t statusmsg_time;
@@ -154,6 +178,7 @@ struct editorConfig {
   int selection_active;
   int mode;
   int is_undoing;
+  int is_updating_cache;
   struct UndoSystem undo_system;
 };
 
@@ -205,6 +230,16 @@ void editorStartUndoStep(const char *description);
 void editorAddUndoAction(UndoActionType type, int y, int x, const char *data, const char *old_data);
 void editorFreeUndoStep(struct UndoStep *step);
 void editorClearUndoSystem();
+
+/* Piece Table prototypes */
+size_t editorPieceTableTotalSize();
+void editorPieceTableGetBytes(size_t offset, size_t len, char *dest);
+char* editorPieceTableGetLine(int cy, size_t *len);
+void editorLineIndexRebuild();
+void editorPieceTableInsert(size_t offset, const char *data, size_t len);
+void editorPieceTableDelete(size_t offset, size_t len);
+void editorUpdateCache();
+
 void editorSelectRowText();
 void editorSelectInsideDelims();
 int findMatchingRightInLine(erow *row, int start_idx, char open_ch, char close_ch);
@@ -464,36 +499,28 @@ void editorUpdateRow(erow *row) {
  * @param len The length of the string.
  */
 void editorInsertRow(int at, char *s, size_t len) {
-  if (at < 0 || at > E.numrows) return;
+  if (at < 0 || at > E.index.count) return;
 
   if (!E.is_undoing && E.undo_system.current) {
     editorAddUndoAction(UNDO_INSERT_ROW, at, 0, s, NULL);
   }
 
-  E.row = realloc(E.row, sizeof(erow) * (E.numrows + 1));
-  memmove(&E.row[at + 1], &E.row[at], sizeof(erow) * (E.numrows - at));
-
-  for (int j = at + 1; j <= E.numrows; j++) E.row[j].idx++;
-
-  E.row[at].idx = at;
-  E.row[at].size = len;
-  E.row[at].chars = malloc(len + 1);
-  memcpy(E.row[at].chars, s, len);
-  E.row[at].chars[len] = '\0';
-
-  E.row[at].rsize = 0;
-  E.row[at].render = NULL;
-  E.row[at].hl = NULL;
-  E.row[at].hl_open_comment = 0;
-  editorUpdateRow(&E.row[at]);
-
-  E.numrows++;
+  size_t offset = (at < E.index.count) ? E.index.offsets[at] : editorPieceTableTotalSize();
+  
+  // Create a string with the text and a newline
+  char *buf = malloc(len + 2);
+  memcpy(buf, s, len);
+  buf[len] = '\n';
+  
+  editorPieceTableInsert(offset, buf, len + 1);
+  free(buf);
+  
+  editorUpdateCache();
   E.dirty++;
 }
 
 /**
  * @brief Frees the memory allocated for a row.
- * @param row The row to free.
  */
 void editorFreeRow(erow *row) {
   free(row->render);
@@ -503,20 +530,24 @@ void editorFreeRow(erow *row) {
 
 /**
  * @brief Deletes a row from the editor.
- * @param at The index of the row to delete.
  */
 void editorDelRow(int at) {
-  if (at < 0 || at >= E.numrows) return;
-  erow *row = &E.row[at];
+  if (at < 0 || at >= E.index.count) return;
+  
+  size_t start = E.index.offsets[at];
+  size_t end = (at + 1 < E.index.count) ? E.index.offsets[at+1] : editorPieceTableTotalSize();
+  size_t len = end - start;
 
   if (!E.is_undoing && E.undo_system.current) {
-    editorAddUndoAction(UNDO_DELETE_ROW, at, 0, NULL, row->chars);
+    char *buf = malloc(len + 1);
+    editorPieceTableGetBytes(start, len, buf);
+    buf[len] = '\0';
+    editorAddUndoAction(UNDO_DELETE_ROW, at, 0, NULL, buf);
+    free(buf);
   }
 
-  editorFreeRow(&E.row[at]);
-  memmove(&E.row[at], &E.row[at + 1], sizeof(erow) * (E.numrows - at - 1));
-  for (int j = at; j < E.numrows - 1; j++) E.row[j].idx--;
-  E.numrows--;
+  editorPieceTableDelete(start, len);
+  editorUpdateCache();
   E.dirty++;
 }
 
@@ -526,65 +557,322 @@ void editorDelRow(int at) {
  * @param at The index at which to insert the character.
  * @param c The character to insert.
  */
-void editorRowInsertChar(erow *row, int at, int c) {
-  if (at < 0 || at > row->size) at = row->size;
+void editorRowInsertChar(int row_idx, int at, int c) {
+  if (row_idx < 0 || row_idx >= E.index.count) return;
+  if (at < 0 || at > E.row[row_idx].size) at = E.row[row_idx].size;
 
   if (!E.is_undoing && E.undo_system.current) {
     char data[2] = {(char)c, 0};
-    editorAddUndoAction(UNDO_INSERT_CHAR, row->idx, at, data, NULL);
+    editorAddUndoAction(UNDO_INSERT_CHAR, row_idx, at, data, NULL);
   }
 
-  row->chars = realloc(row->chars, row->size + 2);
-  memmove(&row->chars[at + 1], &row->chars[at], row->size - at + 1);
-  row->size++;
-  row->chars[at] = c;
-  editorUpdateRow(row);
+  char data[2] = {(char)c, 0};
+  size_t offset = E.index.offsets[row_idx] + at;
+  editorPieceTableInsert(offset, data, 1);
+  editorUpdateCache();
   E.dirty++;
 }
 
 /**
  * @brief Inserts a string into a row at a specific position.
  */
-void editorRowInsertText(erow *row, int at, const char *s, size_t len) {
-  if (at < 0 || at > row->size) at = row->size;
+size_t editorPieceTableTotalSize() {
+    size_t total = 0;
+    Piece *curr = E.table.head;
+    while (curr) {
+        total += curr->length;
+        curr = curr->next;
+    }
+    return total;
+}
+
+void editorPieceTableGetBytes(size_t offset, size_t len, char *dest) {
+    Piece *curr = E.table.head;
+    size_t current_offset = 0;
+    size_t dest_idx = 0;
+
+    while (curr && dest_idx < len) {
+        if (current_offset + curr->length > offset) {
+            size_t skip = (offset > current_offset) ? (offset - current_offset) : 0;
+            size_t to_copy = curr->length - skip;
+            if (dest_idx + to_copy > len) to_copy = len - dest_idx;
+
+            char *src = (curr->source == 0) ? E.table.original_buffer : E.table.add_buffer;
+            if (src) {
+                memcpy(dest + dest_idx, src + curr->start + skip, to_copy);
+            }
+
+            dest_idx += to_copy;
+            offset += to_copy;
+        }
+        current_offset += curr->length;
+        curr = curr->next;
+    }
+}
+
+char* editorPieceTableGetLine(int cy, size_t *len) {
+    if (cy < 0 || cy >= E.index.count) {
+        *len = 0;
+        return NULL;
+    }
+    size_t start = E.index.offsets[cy];
+    size_t end = (cy + 1 < E.index.count) ? E.index.offsets[cy+1] : editorPieceTableTotalSize();
+    *len = end - start;
+    
+    char *buf = malloc(*len + 1);
+    editorPieceTableGetBytes(start, *len, buf);
+    buf[*len] = '\0';
+    return buf;
+}
+
+void editorLineIndexRebuild() {
+    if (E.index.offsets == NULL) {
+        E.index.capacity = 100;
+        E.index.offsets = malloc(sizeof(size_t) * E.index.capacity);
+    }
+    E.index.count = 0;
+    size_t total_size = editorPieceTableTotalSize();
+    
+    if (total_size == 0) {
+        E.index.offsets[0] = 0;
+        E.index.count = 1;
+        E.numrows = 1;
+        return;
+    }
+
+    char *full_text = malloc(total_size + 1);
+    editorPieceTableGetBytes(0, total_size, full_text);
+    
+    size_t offset = 0;
+    while (offset <= total_size) {
+        if (E.index.count >= E.index.capacity) {
+            E.index.capacity *= 2;
+            E.index.offsets = realloc(E.index.offsets, sizeof(size_t) * E.index.capacity);
+        }
+        E.index.offsets[E.index.count++] = offset;
+        
+        char *nl = memchr(full_text + offset, '\n', total_size - offset);
+        if (nl) {
+            offset = (nl - full_text) + 1;
+        } else {
+            break;
+        }
+    }
+    free(full_text);
+}
+
+void editorPieceTableInsert(size_t offset, const char *data, size_t len) {
+    if (E.table.add_size + len > E.table.add_capacity) {
+        E.table.add_capacity = (E.table.add_size + len) * 2;
+        E.table.add_buffer = realloc(E.table.add_buffer, E.table.add_capacity);
+    }
+    size_t add_start = E.table.add_size;
+    memcpy(E.table.add_buffer + add_start, data, len);
+    E.table.add_size += len;
+
+    Piece *curr = E.table.head;
+    size_t current_offset = 0;
+    
+    if (offset == 0 && curr == NULL) {
+        Piece *new_p = malloc(sizeof(Piece));
+        new_p->source = 1;
+        new_p->start = add_start;
+        new_p->length = len;
+        new_p->prev = NULL;
+        new_p->next = NULL;
+        E.table.head = new_p;
+    } else {
+        while (curr) {
+            if (current_offset <= offset && current_offset + curr->length >= offset) {
+                size_t relative_offset = offset - current_offset;
+                
+                if (relative_offset == 0) {
+                    Piece *new_p = malloc(sizeof(Piece));
+                    new_p->source = 1;
+                    new_p->start = add_start;
+                    new_p->length = len;
+                    new_p->next = curr;
+                    new_p->prev = curr->prev;
+                    if (curr->prev) curr->prev->next = new_p;
+                    else E.table.head = new_p;
+                    curr->prev = new_p;
+                    break;
+                } else if (relative_offset == curr->length) {
+                    Piece *new_p = malloc(sizeof(Piece));
+                    new_p->source = 1;
+                    new_p->start = add_start;
+                    new_p->length = len;
+                    new_p->prev = curr;
+                    new_p->next = curr->next;
+                    if (curr->next) curr->next->prev = new_p;
+                    curr->next = new_p;
+                    break;
+                } else {
+                    Piece *next_p = malloc(sizeof(Piece));
+                    next_p->source = curr->source;
+                    next_p->start = curr->start + relative_offset;
+                    next_p->length = curr->length - relative_offset;
+                    next_p->next = curr->next;
+                    next_p->prev = NULL; // Will be set below
+                    
+                    Piece *new_p = malloc(sizeof(Piece));
+                    new_p->source = 1;
+                    new_p->start = add_start;
+                    new_p->length = len;
+                    
+                    curr->length = relative_offset;
+                    
+                    new_p->prev = curr;
+                    new_p->next = next_p;
+                    
+                    next_p->prev = new_p;
+                    if (next_p->next) next_p->next->prev = next_p;
+                    
+                    curr->next = new_p;
+                    break;
+                }
+            }
+            current_offset += curr->length;
+            curr = curr->next;
+        }
+    }
+    
+    editorLineIndexRebuild();
+}
+
+void editorPieceTableDelete(size_t offset, size_t len) {
+    if (len == 0) return;
+    
+    Piece *curr = E.table.head;
+    size_t current_offset = 0;
+    
+    while (curr && len > 0) {
+        if (current_offset + curr->length > offset) {
+            size_t relative_offset = (offset > current_offset) ? (offset - current_offset) : 0;
+            size_t to_delete = curr->length - relative_offset;
+            if (to_delete > len) to_delete = len;
+            
+            if (relative_offset == 0 && to_delete == curr->length) {
+                Piece *next = curr->next;
+                if (curr->prev) curr->prev->next = next;
+                else E.table.head = next;
+                if (next) next->prev = curr->prev;
+                free(curr);
+                curr = next;
+                len -= to_delete;
+                continue;
+            } else if (relative_offset == 0) {
+                curr->start += to_delete;
+                curr->length -= to_delete;
+                len -= to_delete;
+            } else if (relative_offset + to_delete == curr->length) {
+                curr->length = relative_offset;
+                len -= to_delete;
+            } else {
+                Piece *next_p = malloc(sizeof(Piece));
+                next_p->source = curr->source;
+                next_p->start = curr->start + relative_offset + to_delete;
+                next_p->length = curr->length - relative_offset - to_delete;
+                next_p->next = curr->next;
+                next_p->prev = curr;
+                if (curr->next) curr->next->prev = next_p;
+                curr->next = next_p;
+                curr->length = relative_offset;
+                len = 0;
+            }
+        }
+        if (curr) {
+            current_offset += curr->length;
+            curr = curr->next;
+        }
+    }
+    
+    editorLineIndexRebuild();
+}
+
+void editorUpdateCache() {
+    E.is_updating_cache = 1;
+    
+    // Libera la vecchia cache usando il vecchio E.numrows
+    if (E.row) {
+        for (int i = 0; i < E.numrows; i++) editorFreeRow(&E.row[i]);
+        free(E.row);
+    }
+    E.row = NULL;
+    
+    // Aggiorna E.numrows al nuovo valore logico
+    E.numrows = E.index.count;
+    
+    if (E.numrows > 0) {
+        E.row = calloc(E.numrows, sizeof(erow));
+        for (int i = 0; i < E.numrows; i++) {
+            size_t len;
+            char *line = editorPieceTableGetLine(i, &len);
+            
+            E.row[i].idx = i;
+            int actual_len = (int)len;
+            if (line) {
+                if (actual_len > 0 && line[actual_len-1] == '\n') actual_len--;
+                if (actual_len > 0 && line[actual_len-1] == '\r') actual_len--;
+            }
+            
+            if (actual_len < 0) actual_len = 0;
+
+            E.row[i].size = actual_len;
+            E.row[i].chars = malloc(actual_len + 1);
+            if (line && actual_len > 0) {
+                memcpy(E.row[i].chars, line, actual_len);
+            }
+            E.row[i].chars[actual_len] = '\0';
+            E.row[i].rsize = 0;
+            E.row[i].render = NULL;
+            E.row[i].hl = NULL;
+            E.row[i].hl_open_comment = 0;
+            editorUpdateRow(&E.row[i]);
+            if (line) free(line);
+        }
+    }
+    E.is_updating_cache = 0;
+}
+
+void editorRowInsertText(int row_idx, int at, const char *s, size_t len) {
+  if (row_idx < 0 || row_idx >= E.index.count) return;
+  if (at < 0 || at > E.row[row_idx].size) at = E.row[row_idx].size;
   
   if (!E.is_undoing && E.undo_system.current) {
-    editorAddUndoAction(UNDO_INSERT_TEXT, row->idx, at, s, NULL);
+    editorAddUndoAction(UNDO_INSERT_TEXT, row_idx, at, s, NULL);
   }
 
-  row->chars = realloc(row->chars, row->size + len + 1);
-  memmove(&row->chars[at + len], &row->chars[at], row->size - at + 1);
-  memcpy(&row->chars[at], s, len);
-  row->size += len;
-  editorUpdateRow(row);
+  size_t offset = E.index.offsets[row_idx] + at;
+  editorPieceTableInsert(offset, s, len);
+  editorUpdateCache();
   E.dirty++;
 }
 
-/**
- * @brief Deletes a range of characters from a row.
- */
-void editorRowDelText(erow *row, int at, size_t len) {
-  if (at < 0 || (size_t)at + len > (size_t)row->size) return;
+void editorRowDelText(int row_idx, int at, size_t len) {
+  if (row_idx < 0 || row_idx >= E.index.count) return;
+  if (at < 0 || (size_t)at + len > (size_t)E.row[row_idx].size) return;
 
   if (!E.is_undoing && E.undo_system.current) {
     char *deleted = malloc(len + 1);
-    memcpy(deleted, &row->chars[at], len);
+    memcpy(deleted, &E.row[row_idx].chars[at], len);
     deleted[len] = '\0';
-    editorAddUndoAction(UNDO_DELETE_TEXT, row->idx, at, NULL, deleted);
+    editorAddUndoAction(UNDO_DELETE_TEXT, row_idx, at, NULL, deleted);
     free(deleted);
   }
 
-  memmove(&row->chars[at], &row->chars[at + len], row->size - (at + len) + 1);
-  row->size -= len;
-  editorUpdateRow(row);
+  size_t offset = E.index.offsets[row_idx] + at;
+  editorPieceTableDelete(offset, len);
+  editorUpdateCache();
   E.dirty++;
 }
 
 /**
  * @brief Appends a string to the end of a row.
  */
-void editorRowAppendString(erow *row, char *s, size_t len) {
-  editorRowInsertText(row, row->size, s, len);
+void editorRowAppendString(int row_idx, char *s, size_t len) {
+  if (row_idx < 0 || row_idx >= E.index.count) return;
+  editorRowInsertText(row_idx, E.row[row_idx].size, s, len);
 }
 
 /**
@@ -592,17 +880,18 @@ void editorRowAppendString(erow *row, char *s, size_t len) {
  * @param row The row to delete the character from.
  * @param at The index of the character to delete.
  */
-void editorRowDelChar(erow *row, int at) {
-  if (at < 0 || at >= row->size) return;
+void editorRowDelChar(int row_idx, int at) {
+  if (row_idx < 0 || row_idx >= E.index.count) return;
+  if (at < 0 || at >= E.row[row_idx].size) return;
 
   if (!E.is_undoing && E.undo_system.current) {
-    char data[2] = {row->chars[at], 0};
-    editorAddUndoAction(UNDO_DELETE_CHAR, row->idx, at, NULL, data);
+    char data[2] = {E.row[row_idx].chars[at], 0};
+    editorAddUndoAction(UNDO_DELETE_CHAR, row_idx, at, NULL, data);
   }
 
-  memmove(&row->chars[at], &row->chars[at + 1], row->size - at);
-  row->size--;
-  editorUpdateRow(row);
+  size_t offset = E.index.offsets[row_idx] + at;
+  editorPieceTableDelete(offset, 1);
+  editorUpdateCache();
   E.dirty++;
 }
 
@@ -616,7 +905,7 @@ void editorInsertChar(int c) {
   if (E.cy == E.numrows) {
     editorInsertRow(E.numrows, "", 0);
   }
-  editorRowInsertChar(&E.row[E.cy], E.cx, c);
+  editorRowInsertChar(E.cy, E.cx, c);
   E.cx++;
   char closing_char = 0;
   switch (c) {
@@ -627,7 +916,7 @@ void editorInsertChar(int c) {
     case '\'': closing_char = '\''; break;
   }
   if (closing_char) {
-    editorRowInsertChar(&E.row[E.cy], E.cx, closing_char);
+    editorRowInsertChar(E.cy, E.cx, closing_char);
   }
 }
 
@@ -647,19 +936,23 @@ void editorInsertNewline() {
   if (E.cx == 0) {
     editorInsertRow(E.cy, "", 0);
   } else {
-    erow *row = &E.row[E.cy];
-    editorInsertRow(E.cy + 1, &row->chars[E.cx], row->size - E.cx);
-    row = &E.row[E.cy];
-    editorRowDelText(row, E.cx, row->size - E.cx);
+    // Copy the text to be moved before it gets potentially freed by editorUpdateCache
+    int len = E.row[E.cy].size - E.cx;
+    char *suffix = malloc(len + 1);
+    memcpy(suffix, &E.row[E.cy].chars[E.cx], len);
+    suffix[len] = '\0';
+
+    editorInsertRow(E.cy + 1, suffix, len);
+    editorRowDelText(E.cy, E.cx, len);
+    free(suffix);
   }
   E.cy++;
   E.cx = 0;
 
   // Inserisce l'indentazione nella nuova riga e posiziona il cursore
   if (E.cy < E.numrows && prev_indent > 0) {
-    erow *nrow = &E.row[E.cy];
     for (int i = 0; i < prev_indent; i++) {
-      editorRowInsertChar(nrow, i, ' ');
+      editorRowInsertChar(E.cy, i, ' ');
       E.cx++;
     }
   }
@@ -755,9 +1048,8 @@ void editorDelCharSelection() {
       editorSetStatusMessage("editorDelCharSelection: Suffix len: %d, Suffix: '%s'", suffix_of_end_row_len, suffix_of_end_row);
   }
 
-  erow *start_row = &E.row[start_cy];
-  editorRowDelText(start_row, start_cx, start_row->size - start_cx);
-  editorSetStatusMessage("editorDelCharSelection: Start row truncated. New size: %d", start_row->size);
+  editorRowDelText(start_cy, start_cx, E.row[start_cy].size - start_cx);
+  editorSetStatusMessage("editorDelCharSelection: Start row truncated. New size: %d", E.row[start_cy].size);
 
   for (int i = end_cy; i > start_cy; i--) {
       editorDelRow(i);
@@ -765,9 +1057,9 @@ void editorDelCharSelection() {
   }
 
   if (suffix_of_end_row_len > 0) {
-      editorRowAppendString(start_row, suffix_of_end_row, suffix_of_end_row_len);
+      editorRowAppendString(start_cy, suffix_of_end_row, suffix_of_end_row_len);
       free(suffix_of_end_row);
-      editorSetStatusMessage("editorDelCharSelection: Suffix appended. New row size: %d", start_row->size);
+      editorSetStatusMessage("editorDelCharSelection: Suffix appended. New row size: %d", E.row[start_cy].size);
   }
 
   E.cx = start_cx;
@@ -781,19 +1073,25 @@ void editorDelCharSelection() {
 void editorDelChar() {
   if (E.cy == E.numrows) return;
   if (E.cx == 0 && E.cy == 0) return;
-  erow *row = &E.row[E.cy];
   if (E.cx > 0) {
     int start = E.cx - 1;
-    while (start > 0 && (row->chars[start] & 0xc0) == 0x80) start--;
+    while (start > 0 && (E.row[E.cy].chars[start] & 0xc0) == 0x80) start--;
     int len = E.cx - start;
-    editorRowDelText(row, start, len);
+    editorRowDelText(E.cy, start, len);
     E.cx = start;
   }
   else {
+    // Copy data before row might be freed
+    int len = E.row[E.cy].size;
+    char *chars = malloc(len + 1);
+    memcpy(chars, E.row[E.cy].chars, len);
+    chars[len] = '\0';
+
     E.cx = E.row[E.cy - 1].size;
-    editorRowAppendString(&E.row[E.cy - 1], row->chars, row->size);
+    editorRowAppendString(E.cy - 1, chars, len);
     editorDelRow(E.cy);
     E.cy--;
+    free(chars);
   }
 }
 
@@ -869,6 +1167,18 @@ void editorOpen(char *filename) {
   E.numrows = 0;
   E.cx = 0; E.cy = 0; E.rowoff = 0; E.coloff = 0;
 
+  // Reset Piece Table
+  free(E.table.original_buffer);
+  Piece *curr = E.table.head;
+  while(curr) {
+      Piece *next = curr->next;
+      free(curr);
+      curr = next;
+  }
+  E.table.head = NULL;
+  E.table.original_buffer = NULL;
+  E.table.original_size = 0;
+
   free(E.filename);
   E.filename = strdup(filename);
 
@@ -878,22 +1188,35 @@ void editorOpen(char *filename) {
   editorClearUndoSystem();
 
   if (fp) {
-    char *line = NULL;
-    size_t linecap = 0;
-    ssize_t linelen;
-    while ((linelen = getline(&line, &linecap, fp)) != -1) {
-      while (linelen > 0 &&
-             (line[linelen - 1] == '\n' || line[linelen - 1] == '\r'))
-        linelen--;
-      editorInsertRow(E.numrows, line, linelen);
+    fseek(fp, 0, SEEK_END);
+    E.table.original_size = ftell(fp);
+    fseek(fp, 0, SEEK_SET);
+    E.table.original_buffer = malloc(E.table.original_size);
+    if (fread(E.table.original_buffer, 1, E.table.original_size, fp) != E.table.original_size) {
+        // Handle error
     }
-    free(line);
     fclose(fp);
+
+    Piece *p = malloc(sizeof(Piece));
+    p->source = 0;
+    p->start = 0;
+    p->length = E.table.original_size;
+    p->prev = NULL;
+    p->next = NULL;
+    E.table.head = p;
+
+    // Rebuild index and cache
+    editorLineIndexRebuild();
+    editorUpdateCache();
+
     E.dirty = 0;
     editorSetStatusMessage("%s opened.", filename);
   } else {
     E.dirty = 0;
     editorSetStatusMessage("New file: %s", filename);
+    // Ensure at least one empty row for new files
+    editorLineIndexRebuild();
+    editorUpdateCache();
   }
 }
 
@@ -1128,27 +1451,30 @@ void editorPaste() {
 
     if (len > 0) {
       if (E.cy == E.numrows) editorInsertRow(E.numrows, "", 0);
-      editorRowInsertText(&E.row[E.cy], E.cx, &E.clipboard[start], len);
+      editorRowInsertText(E.cy, E.cx, &E.clipboard[start], len);
       E.cx += len;
     }
 
     if (i < E.clipboard_len && E.clipboard[i] == '\n') {
       if (E.cy == E.numrows) editorInsertRow(E.numrows, "", 0);
-      erow *row = &E.row[E.cy];
-      
+
+      // Copy the text to be moved before it gets potentially freed by editorUpdateCache
+      int suffix_len = E.row[E.cy].size - E.cx;
+      char *suffix = malloc(suffix_len + 1);
+      memcpy(suffix, &E.row[E.cy].chars[E.cx], suffix_len);
+      suffix[suffix_len] = '\0';
+
       // Crea la nuova riga con il contenuto rimanente dopo il cursore
-      editorInsertRow(E.cy + 1, &row->chars[E.cx], row->size - E.cx);
-      
-      // Riassegna row dopo il realloc potenziale di editorInsertRow
-      row = &E.row[E.cy];
+      editorInsertRow(E.cy + 1, suffix, suffix_len);
+
       // Tronca la riga corrente
-      editorRowDelText(row, E.cx, row->size - E.cx);
-      
+      editorRowDelText(E.cy, E.cx, suffix_len);
+      free(suffix);
+
       E.cy++;
       E.cx = 0;
       i++;
-    }
-  }
+    }  }
 
   E.selection_start_cx = paste_start_cx;
   E.selection_start_cy = paste_start_cy;
@@ -1314,7 +1640,7 @@ void editorUpdateSyntax(erow *row) {
 
   int changed = (row->hl_open_comment != in_comment);
   row->hl_open_comment = in_comment;
-  if (changed && row->idx + 1 < E.numrows)
+  if (changed && !E.is_updating_cache && row->idx + 1 < E.numrows)
     editorUpdateSyntax(&E.row[row->idx + 1]);
 }
 
@@ -2095,16 +2421,15 @@ void editorProcessKeypress() {
       case DEL_KEY: {
         // Smart outdent su BACKSPACE quando il cursore è sul primo carattere non-spazio
         if (c != DEL_KEY && E.cy < E.numrows) {
-          erow *row = &E.row[E.cy];
           int first_ns = 0;
-          while (first_ns < row->size && row->chars[first_ns] == ' ') first_ns++;
+          while (first_ns < E.row[E.cy].size && E.row[E.cy].chars[first_ns] == ' ') first_ns++;
           if (E.cx == first_ns && first_ns > 0) {
             int target = (first_ns - 1) / WEE_TAB_STOP * WEE_TAB_STOP; // tab stop precedente
             int to_delete = first_ns - target;
             // Elimina 'to_delete' spazi dall'inizio della riga
             for (int i = 0; i < to_delete; i++) {
-              if (row->size > 0 && row->chars[0] == ' ') {
-                editorRowDelChar(row, 0);
+              if (E.row[E.cy].size > 0 && E.row[E.cy].chars[0] == ' ') {
+                editorRowDelChar(E.cy, 0);
               }
             }
             E.cx = target;
@@ -2235,9 +2560,8 @@ void editorIndentSelection() {
   }
 
   for (int i = start_cy; i <= end_cy; i++) {
-    erow *row = &E.row[i];
     for (int j = 0; j < WEE_TAB_STOP; j++) {
-      editorRowInsertChar(row, 0, ' ');
+      editorRowInsertChar(i, 0, ' ');
     }
   }
 
@@ -2259,11 +2583,10 @@ void editorUnindentSelection() {
   }
 
   for (int i = start_cy; i <= end_cy; i++) {
-    erow *row = &E.row[i];
     int chars_deleted_count = 0;
     for (int j = 0; j < WEE_TAB_STOP; j++) {
-      if (row->size > 0 && row->chars[0] == ' ') {
-        editorRowDelChar(row, 0);
+      if (E.row[i].size > 0 && E.row[i].chars[0] == ' ') {
+        editorRowDelChar(i, 0);
         chars_deleted_count++;
       } else {
         break;
@@ -2301,10 +2624,9 @@ void editorMoveSelectionLeft() {
 
   // Per selezioni su una sola riga
   if (start_cy == end_cy) {
-    erow *row = &E.row[start_cy];
     // Rimuovi uno spazio prima della selezione, se presente
-    if (start_cx > 0 && row->chars[start_cx - 1] == ' ') {
-      editorRowDelChar(row, start_cx - 1);
+    if (start_cx > 0 && E.row[start_cy].chars[start_cx - 1] == ' ') {
+      editorRowDelChar(start_cy, start_cx - 1);
       
       // Aggiorna le coordinate della selezione
       E.selection_start_cx--;
@@ -2313,17 +2635,16 @@ void editorMoveSelectionLeft() {
   } else {
     // Per selezioni su più righe: rimuovi spazio prima di ogni parte della selezione
     for (int i = start_cy; i <= end_cy; i++) {
-      erow *row = &E.row[i];
       if (i == start_cy) {
         // Prima riga: rimuovi spazio prima di start_cx se presente
-        if (start_cx > 0 && row->chars[start_cx - 1] == ' ') {
-          editorRowDelChar(row, start_cx - 1);
+        if (start_cx > 0 && E.row[i].chars[start_cx - 1] == ' ') {
+          editorRowDelChar(i, start_cx - 1);
           E.selection_start_cx--;
         }
       } else {
         // Altre righe: rimuovi spazio all'inizio se presente
-        if (row->size > 0 && row->chars[0] == ' ') {
-          editorRowDelChar(row, 0);
+        if (E.row[i].size > 0 && E.row[i].chars[0] == ' ') {
+          editorRowDelChar(i, 0);
           if (i == end_cy) {
             E.selection_end_cx--;
             if (E.selection_end_cx < 0) E.selection_end_cx = 0;
@@ -2356,9 +2677,8 @@ void editorMoveSelectionRight() {
 
   // Per selezioni su una sola riga
   if (start_cy == end_cy) {
-    erow *row = &E.row[start_cy];
     // Inserisci uno spazio prima della selezione
-    editorRowInsertChar(row, start_cx, ' ');
+    editorRowInsertChar(start_cy, start_cx, ' ');
     
     // Aggiorna le coordinate della selezione
     E.selection_start_cx++;
@@ -2366,18 +2686,17 @@ void editorMoveSelectionRight() {
   } else {
     // Per selezioni su più righe: inserisci spazio all'inizio di ogni riga
     for (int i = start_cy; i <= end_cy; i++) {
-      erow *row = &E.row[i];
       if (i == start_cy) {
         // Prima riga: inserisci spazio alla posizione start_cx
-        editorRowInsertChar(row, start_cx, ' ');
+        editorRowInsertChar(i, start_cx, ' ');
         E.selection_start_cx++;
       } else if (i == end_cy) {
         // Ultima riga: inserisci spazio all'inizio
-        editorRowInsertChar(row, 0, ' ');
+        editorRowInsertChar(i, 0, ' ');
         E.selection_end_cx++;
       } else {
         // Righe intermedie: inserisci spazio all'inizio
-        editorRowInsertChar(row, 0, ' ');
+        editorRowInsertChar(i, 0, ' ');
       }
     }
   }
@@ -2758,10 +3077,10 @@ void editorApplyAction(struct UndoAction *action, int undo) {
     if (undo) {
         switch (action->type) {
             case UNDO_INSERT_CHAR:
-                editorRowDelChar(&E.row[action->y], action->x);
+                editorRowDelChar(action->y, action->x);
                 break;
             case UNDO_DELETE_CHAR:
-                editorRowInsertChar(&E.row[action->y], action->x, action->old_data[0]);
+                editorRowInsertChar(action->y, action->x, action->old_data[0]);
                 break;
             case UNDO_INSERT_ROW:
                 editorDelRow(action->y);
@@ -2770,19 +3089,19 @@ void editorApplyAction(struct UndoAction *action, int undo) {
                 editorInsertRow(action->y, action->old_data, strlen(action->old_data));
                 break;
             case UNDO_INSERT_TEXT:
-                editorRowDelText(&E.row[action->y], action->x, strlen(action->data));
+                editorRowDelText(action->y, action->x, strlen(action->data));
                 break;
             case UNDO_DELETE_TEXT:
-                editorRowInsertText(&E.row[action->y], action->x, action->old_data, strlen(action->old_data));
+                editorRowInsertText(action->y, action->x, action->old_data, strlen(action->old_data));
                 break;
         }
     } else {
         switch (action->type) {
             case UNDO_INSERT_CHAR:
-                editorRowInsertChar(&E.row[action->y], action->x, action->data[0]);
+                editorRowInsertChar(action->y, action->x, action->data[0]);
                 break;
             case UNDO_DELETE_CHAR:
-                editorRowDelChar(&E.row[action->y], action->x);
+                editorRowDelChar(action->y, action->x);
                 break;
             case UNDO_INSERT_ROW:
                 editorInsertRow(action->y, action->data, strlen(action->data));
@@ -2791,10 +3110,10 @@ void editorApplyAction(struct UndoAction *action, int undo) {
                 editorDelRow(action->y);
                 break;
             case UNDO_INSERT_TEXT:
-                editorRowInsertText(&E.row[action->y], action->x, action->data, strlen(action->data));
+                editorRowInsertText(action->y, action->x, action->data, strlen(action->data));
                 break;
             case UNDO_DELETE_TEXT:
-                editorRowDelText(&E.row[action->y], action->x, strlen(action->old_data));
+                editorRowDelText(action->y, action->x, strlen(action->old_data));
                 break;
         }
     }
@@ -3310,20 +3629,9 @@ void editorQuickSelectChar(int direction) {
 
     // Move the actual editor cursor based on the direction.
     if (direction == -1) { // Move left
-        if (E.cx > 0) {
-            E.cx--;
-        } else if (E.cy > 0) {
-            E.cy--;
-            E.cx = E.row[E.cy].size;
-        }
+        editorMoveCursor(ARROW_LEFT);
     } else { // Move right
-        erow *row = &E.row[E.cy];
-        if (E.cx < row->size) {
-            E.cx++;
-        } else if (E.cy < E.numrows - 1) {
-            E.cy++;
-            E.cx = 0;
-        }
+        editorMoveCursor(ARROW_RIGHT);
     }
 
     // The cursor (anc2) always follows the editor's cursor.
@@ -3653,6 +3961,19 @@ void initEditor() {
   E.numrows = 0;
   E.row = NULL;
   E.filename = NULL;
+
+  E.table.original_buffer = NULL;
+  E.table.original_size = 0;
+  E.table.add_buffer = malloc(4096);
+  E.table.add_size = 0;
+  E.table.add_capacity = 4096;
+  E.table.head = NULL;
+
+  E.index.count = 0;
+  E.index.capacity = 100;
+  E.index.offsets = malloc(sizeof(size_t) * E.index.capacity);
+  E.index.count = 0;
+
   E.statusmsg[0] = '\0';
   E.statusmsg_time = 0;
   E.dirty = 0;
@@ -3670,6 +3991,7 @@ void initEditor() {
   E.selection_active = 0;
   E.mode = NORMAL_MODE;
   E.is_undoing = 0;
+  E.is_updating_cache = 0;
 
   // Inizializza sistema undo
   E.undo_system.head = NULL;
@@ -3677,6 +3999,10 @@ void initEditor() {
   E.undo_system.max_steps = 100;
   E.undo_system.current_count = 0;
   E.undo_system.last_action_time = 0;
+
+  // Inizializza Piece Table e Cache DOPO che tutto il resto è pronto
+  editorLineIndexRebuild();
+  editorUpdateCache();
 
   if (getWindowSize(&E.screenrows, &E.screencols) == -1) die("getWindowSize");
   E.screenrows -= 2;

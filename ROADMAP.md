@@ -3,7 +3,7 @@
 ## 1. Fondamenta ed Efficienza
 - [x] **Undo/Redo Incrementale**: Passaggio da snapshot completi a registrazione di azioni atomiche (diff-based).
 - [x] **Supporto UTF-8**: Gestione corretta dei caratteri multibyte per navigazione e rendering.
-- [ ] **Ottimizzazione Struttura Dati Righe**: Valutazione Piece Table / Gap Buffer per inserimenti $O(1)$.
+- [x] **Ottimizzazione Struttura Dati Righe**: Implementata Piece Table per inserimenti $O(1)$ amortizzati.
 
 ## 2. Performance e Rendering
 - [ ] **Rendering Intelligente**: Ridisegno parziale delle sole righe modificate.
