@@ -6,7 +6,6 @@
 #include "viewport.h"
 #include "terminal.h"
 #include "undo.h"
-#include "config.h"
 
 #define EDITOR_VERSION "2.0.0"
 
