@@ -138,52 +138,36 @@ void editor_replace(Editor *E) {
     if (!query) return;
     char *replacement = editor_prompt(E, "Replace with", NULL);
     if (!replacement) { free(query); return; }
-
-    // Always start from the beginning for Replace
     int64_t found = pt_find(E->pt, query, 0, 1, false);
-
     while (found != -1) {
         E->last_match_off = (int)found;
         E->search_match_len = (int)strlen(query);
         editor_move_to_offset(E, found);
         editor_refresh_screen(E);
-
-        char msg[256];
-        snprintf(msg, sizeof(msg), "\x1b[7m Replace '%s' with '%s'? (y/n/a/ESC) \x1b[m", query, replacement);
-        char move_buf[32];
-        snprintf(move_buf, sizeof(move_buf), "\x1b[%d;1H", E->terminal.screenrows + 1);
+        char msg[256]; snprintf(msg, sizeof(msg), "\x1b[7m Replace '%s' with '%s'? (y/n/a/ESC) \x1b[m", query, replacement);
+        char move_buf[32]; snprintf(move_buf, sizeof(move_buf), "\x1b[%d;1H", E->terminal.screenrows + 1);
         write(STDOUT_FILENO, move_buf, strlen(move_buf));
         write(STDOUT_FILENO, msg, strlen(msg)); write(STDOUT_FILENO, "\x1b[K", 3);
         int ln_width = E->show_line_numbers ? snprintf(NULL, 0, "%d ", li_get_line_count(E->li)) + 1 : 0;
         snprintf(move_buf, sizeof(move_buf), "\x1b[%d;%dH", (E->cy - E->rowoff) + 1, (E->rx - E->coloff) + 1 + ln_width);
         write(STDOUT_FILENO, move_buf, strlen(move_buf));
-
-        char c = '\0';
-        if (read(STDIN_FILENO, &c, 1) <= 0) continue;
+        char c = '\0'; if (read(STDIN_FILENO, &c, 1) <= 0) continue;
         if (c == '\x1b') break;
         if (c == 'y' || c == 'Y' || c == 'a' || c == 'A') {
-            size_t qlen = strlen(query);
-            size_t rlen = strlen(replacement);
+            size_t qlen = strlen(query); size_t rlen = strlen(replacement);
             char *deleted = pt_get_text(E->pt, (size_t)found, qlen);
             undo_push(E->undo_stack, ACTION_DELETE, (size_t)found, deleted, qlen);
             free(deleted);
             pt_delete_fixed(E->pt, (size_t)found, qlen);
             pt_insert(E->pt, (size_t)found, replacement, rlen);
             undo_push(E->undo_stack, ACTION_INSERT, (size_t)found, replacement, rlen);
-            editor_sync_model(E);
-            E->dirty = true;
-            if (c == 'y' || c == 'Y') {
-                found = pt_find(E->pt, query, (size_t)found + rlen, 1, false);
-            } else {
-                found = pt_find(E->pt, query, (size_t)found + rlen, 1, false);
-                continue;
-            }
-        } else if (c == 'n' || c == 'N') {
-            found = pt_find(E->pt, query, (size_t)found + 1, 1, false);
-        } else break;
+            editor_sync_model(E); E->dirty = true;
+            if (c == 'y' || c == 'Y') found = pt_find(E->pt, query, (size_t)found + rlen, 1, false);
+            else { found = pt_find(E->pt, query, (size_t)found + rlen, 1, false); continue; }
+        } else if (c == 'n' || c == 'N') found = pt_find(E->pt, query, (size_t)found + 1, 1, false);
+        else break;
     }
-    E->last_match_off = -1; E->search_match_len = 0;
-    free(query); free(replacement);
+    E->last_match_off = -1; E->search_match_len = 0; free(query); free(replacement);
 }
 
 void editor_open_browser(Editor *E) {
@@ -236,11 +220,7 @@ static bool is_offset_selected(Editor *E, size_t offset) {
 
 void editor_resize(Editor *E) {
     if (terminal_get_size(&E->terminal.screenrows, &E->terminal.screencols) == -1) return;
-    E->terminal.screenrows--; // Room for status bar
-    
-    // Re-create viewport with new size
-    vp_destroy(E->vp);
-    E->vp = vp_create(E->terminal.screenrows);
+    E->terminal.screenrows--; vp_destroy(E->vp); E->vp = vp_create(E->terminal.screenrows);
 }
 
 void editor_refresh_screen(Editor *E) {
@@ -284,7 +264,6 @@ void editor_refresh_screen(Editor *E) {
     char status[128], rstatus[64];
     const char *display_name = E->filename ? strrchr(E->filename, '/') : NULL;
     display_name = display_name ? display_name + 1 : (E->filename ? E->filename : "[No Name]");
-    
     int len = snprintf(status, sizeof(status), " %s - %d lines %s", display_name, li_get_line_count(E->li), E->dirty ? "(modified)" : "");
     int rstatus_len = snprintf(rstatus, sizeof(rstatus), "LN: %s %d:%d ", E->show_line_numbers ? "ON" : "OFF", E->cy + 1, E->rx + 1);
     if (len > E->terminal.screencols) len = E->terminal.screencols;
@@ -407,14 +386,14 @@ void editor_process_keypress(Editor *E) {
         case ctrl_key('r'): editor_replace(E); break;
         case ctrl_key('o'): editor_open_browser(E); break;
         case ctrl_key('h'): editor_show_help(E); break;
+        case ctrl_key('g'): if (E->last_search) editor_find_next(E, E->last_search, 1); break;
+        case ctrl_key('p'): if (E->last_search) editor_find_next(E, E->last_search, -1); break;
         case ctrl_key('z'): editor_undo(E); break;
         case ctrl_key('y'): editor_redo(E); break;
         case ctrl_key('c'): editor_copy(E); E->selecting = false; break;
         case ctrl_key('x'): editor_cut(E); break;
         case ctrl_key('v'): editor_paste(E); break;
         case ctrl_key('n'): E->show_line_numbers = !E->show_line_numbers; break;
-        case 'n': if (E->last_search) editor_find_next(E, E->last_search, 1); break;
-        case 'N': if (E->last_search) editor_find_next(E, E->last_search, -1); break;
         case 127: editor_delete_char(E); break;
         case '\x1b': {
             char seq[5]; if (read(STDIN_FILENO, &seq[0], 1) != 1) break;
