@@ -1,0 +1,67 @@
+{
+  "languages": [
+    {
+      "name": "c",
+      "extensions": [".c", ".h"],
+      "keywords": ["switch", "if", "while", "for", "break", "continue", "return", "else", "struct", "union", "typedef", "static", "enum", "class", "case"],
+      "types": ["int", "long", "double", "float", "char", "unsigned", "signed", "void", "bool", "size_t", "NULL"],
+      "comment_single": "//",
+      "comment_multi_start": "/*",
+      "comment_multi_end": "*/"
+    },
+    {
+      "name": "cpp",
+      "extensions": [".cpp", ".hpp", ".cc"],
+      "keywords": ["class", "public", "private", "protected", "template", "typename", "new", "delete", "this", "namespace", "using", "try", "catch", "throw"],
+      "types": ["std", "string", "vector", "map", "set", "uint8_t", "uint16_t", "uint32_t", "uint64_t"],
+      "comment_single": "//",
+      "comment_multi_start": "/*",
+      "comment_multi_end": "*/"
+    },
+    {
+      "name": "rust",
+      "extensions": [".rs"],
+      "keywords": ["fn", "let", "mut", "match", "use", "mod", "pub", "crate", "struct", "enum", "impl", "trait", "type", "where", "move", "loop", "return"],
+      "types": ["i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64", "f32", "f64", "str", "String", "Option", "Result", "Self", "self"],
+      "comment_single": "//",
+      "comment_multi_start": "/*",
+      "comment_multi_end": "*/"
+    },
+    {
+      "name": "python",
+      "extensions": [".py"],
+      "keywords": ["def", "class", "if", "else", "elif", "for", "while", "return", "import", "from", "as", "try", "except", "finally", "with", "yield", "lambda", "global", "nonlocal", "pass", "assert", "del"],
+      "types": ["True", "False", "None", "self", "list", "dict", "tuple", "set", "int", "str", "float"],
+      "comment_single": "#",
+      "comment_multi_start": "'''",
+      "comment_multi_end": "'''"
+    },
+    {
+      "name": "java",
+      "extensions": [".java"],
+      "keywords": ["public", "private", "protected", "static", "final", "class", "interface", "extends", "implements", "package", "import", "new", "return", "if", "else", "for", "while", "try", "catch", "finally", "throw", "throws"],
+      "types": ["int", "double", "float", "long", "short", "byte", "char", "boolean", "String", "Object", "System"],
+      "comment_single": "//",
+      "comment_multi_start": "/*",
+      "comment_multi_end": "*/"
+    },
+    {
+      "name": "go",
+      "extensions": [".go"],
+      "keywords": ["func", "var", "const", "type", "struct", "interface", "package", "import", "return", "if", "else", "switch", "case", "for", "range", "go", "chan", "select", "defer", "panic", "recover"],
+      "types": ["int", "int8", "int16", "int32", "int64", "uint", "uint8", "uint16", "uint32", "uint64", "float32", "float64", "string", "bool", "error"],
+      "comment_single": "//",
+      "comment_multi_start": "/*",
+      "comment_multi_end": "*/"
+    },
+    {
+      "name": "javascript",
+      "extensions": [".js", ".jsx"],
+      "keywords": ["function", "const", "let", "var", "if", "else", "for", "while", "return", "import", "export", "default", "class", "extends", "try", "catch", "finally", "throw", "async", "await", "new", "this", "super"],
+      "types": ["true", "false", "null", "undefined", "NaN", "Object", "Array", "String", "Number", "console", "window", "document"],
+      "comment_single": "//",
+      "comment_multi_start": "/*",
+      "comment_multi_end": "*/"
+    }
+  ]
+}

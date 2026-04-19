@@ -138,8 +138,12 @@ void editor_find(Editor *E) {
             } else break;
         } else if (c == '\r') break;
     }
-    if (E->last_search) free(E->last_search);
-    E->last_search = query; E->last_match_off = -1; E->search_match_len = 0;
+    if (E->last_search) {
+        free(E->last_search);
+    }
+    E->last_search = query;
+    E->last_match_off = -1;
+    E->search_match_len = 0;
 }
 
 void editor_replace(Editor *E) {
@@ -473,35 +477,47 @@ static bool is_full_line_selection(Editor *E) {
     return (s_cx == 0 && e_cx >= (int)last_line_len);
 }
 
+static int get_leading_spaces(Editor *E, int y) {
+    size_t off = li_get_offset(E->li, y);
+    size_t line_len = get_line_len(E, y);
+    if (line_len == 0) return -1;
+    char *line = pt_get_text(E->pt, off, line_len);
+    int count = 0;
+    while (count < (int)line_len && line[count] == ' ') count++;
+    free(line); return count;
+}
+
 void editor_indent_selection(Editor *E, int dir) {
     if (!E->selecting) return;
-    if (!is_full_line_selection(E)) return; 
+    if (!is_full_line_selection(E)) return;
     
     int start_y = E->sel_cy, end_y = E->cy;
     bool cursor_was_at_end = (E->cy >= E->sel_cy);
     if (start_y > end_y) { int t = start_y; start_y = end_y; end_y = t; }
-    
+
+    int min_indent = 1000;
+    if (dir == -1) {
+        for (int y = start_y; y <= end_y; y++) {
+            int indent = get_leading_spaces(E, y);
+            if (indent == -1) continue;
+            if (indent < min_indent) min_indent = indent;
+        }
+        if (min_indent == 1000 || min_indent == 0) return;
+    }
+
+    int to_move = (dir == 1) ? E->tab_size : (min_indent < E->tab_size ? min_indent : E->tab_size);
+
     for (int y = end_y; y >= start_y; y--) {
         size_t off = li_get_offset(E->li, y);
         if (dir == 1) {
-            char *spaces = malloc(E->tab_size + 1);
-            for(int k=0; k<E->tab_size; k++) spaces[k] = ' ';
-            spaces[E->tab_size] = '\0';
-            pt_insert(E->pt, off, spaces, E->tab_size);
-            undo_push(E->undo_stack, ACTION_INSERT, off, spaces, E->tab_size);
-            free(spaces);
+            char spaces[16]; for(int k=0; k<to_move; k++) spaces[k] = ' '; spaces[to_move] = '\0';
+            pt_insert(E->pt, off, spaces, to_move);
+            undo_push(E->undo_stack, ACTION_INSERT, off, spaces, to_move);
         } else {
-            size_t next_off = (y + 1 < li_get_line_count(E->li)) ? li_get_offset(E->li, y+1) : E->pt->total_length;
-            int len = (int)(next_off - off);
-            char *line = pt_get_text(E->pt, off, len);
-            int to_del = 0;
-            while (to_del < E->tab_size && to_del < len && line[to_del] == ' ') to_del++;
-            if (to_del > 0) {
-                char *txt = pt_get_text(E->pt, off, to_del);
-                undo_push(E->undo_stack, ACTION_DELETE, off, txt, to_del);
-                free(txt); pt_delete_fixed(E->pt, off, to_del);
-            }
-            free(line);
+            if (get_leading_spaces(E, y) == -1) continue;
+            char *txt = pt_get_text(E->pt, off, to_move);
+            undo_push(E->undo_stack, ACTION_DELETE, off, txt, to_move);
+            free(txt); pt_delete_fixed(E->pt, off, to_move);
         }
     }
     
