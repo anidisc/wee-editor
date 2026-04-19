@@ -13,6 +13,51 @@
 
 #define ctrl_key(k) ((k) & 0x1f)
 
+/* --- HELPER FUNCTIONS (Logic & Selection) --- */
+
+static size_t get_line_len(Editor *E, int y) {
+    int line_count = li_get_line_count(E->li);
+    if (y < 0 || y >= line_count) return 0;
+    size_t start = li_get_offset(E->li, y);
+    size_t end = (y + 1 < line_count) ? li_get_offset(E->li, y + 1) : E->pt->total_length;
+    size_t len = end - start;
+    char *txt = pt_get_text(E->pt, start, len);
+    if (len > 0 && (txt[len-1] == '\n' || txt[len-1] == '\r')) {
+        if (len > 1 && (txt[len-2] == '\n' || txt[len-2] == '\r')) len -= 2;
+        else len--;
+    }
+    free(txt); return len;
+}
+
+static int get_leading_spaces(Editor *E, int y) {
+    size_t off = li_get_offset(E->li, y);
+    size_t line_len = get_line_len(E, y);
+    if (line_len == 0) return -1;
+    char *line = pt_get_text(E->pt, off, line_len);
+    int count = 0;
+    while (count < (int)line_len && line[count] == ' ') count++;
+    free(line); return count;
+}
+
+static bool is_full_line_selection(Editor *E) {
+    if (!E->selecting) return false;
+    int start_y = E->sel_cy, end_y = E->cy;
+    int s_cx = E->sel_cx, e_cx = E->cx;
+    if (start_y > end_y) { int t = start_y; start_y = end_y; end_y = t; t = s_cx; s_cx = e_cx; e_cx = t; }
+    size_t last_line_len = get_line_len(E, end_y);
+    return (s_cx == 0 && e_cx >= (int)last_line_len);
+}
+
+static bool is_offset_selected(Editor *E, size_t offset) {
+    if (!E->selecting) return false;
+    size_t start = li_get_offset(E->li, E->sel_cy) + E->sel_cx;
+    size_t end = li_get_offset(E->li, E->cy) + E->cx;
+    if (start > end) { size_t tmp = start; start = end; end = tmp; }
+    return offset >= start && offset < end;
+}
+
+/* --- EDITOR CORE --- */
+
 void editor_init(Editor *E) {
     E->cx = 0; E->cy = 0; E->rx = 0;
     E->rowoff = 0; E->coloff = 0;
@@ -138,12 +183,8 @@ void editor_find(Editor *E) {
             } else break;
         } else if (c == '\r') break;
     }
-    if (E->last_search) {
-        free(E->last_search);
-    }
-    E->last_search = query;
-    E->last_match_off = -1;
-    E->search_match_len = 0;
+    if (E->last_search) { free(E->last_search); }
+    E->last_search = query; E->last_match_off = -1; E->search_match_len = 0;
 }
 
 void editor_replace(Editor *E) {
@@ -237,31 +278,9 @@ void editor_scroll(Editor *E) {
         E->coloff = E->rx - (E->terminal.screencols - (E->show_line_numbers ? 6 : 0)) + 1;
 }
 
-static bool is_offset_selected(Editor *E, size_t offset) {
-    if (!E->selecting) return false;
-    size_t start = li_get_offset(E->li, E->sel_cy) + E->sel_cx;
-    size_t end = li_get_offset(E->li, E->cy) + E->cx;
-    if (start > end) { size_t tmp = start; start = end; end = tmp; }
-    return offset >= start && offset < end;
-}
-
 void editor_resize(Editor *E) {
     if (terminal_get_size(&E->terminal.screenrows, &E->terminal.screencols) == -1) return;
     E->terminal.screenrows--; vp_destroy(E->vp); E->vp = vp_create(E->terminal.screenrows);
-}
-
-static size_t get_line_len(Editor *E, int y) {
-    int line_count = li_get_line_count(E->li);
-    if (y < 0 || y >= line_count) return 0;
-    size_t start = li_get_offset(E->li, y);
-    size_t end = (y + 1 < line_count) ? li_get_offset(E->li, y + 1) : E->pt->total_length;
-    size_t len = end - start;
-    char *txt = pt_get_text(E->pt, start, len);
-    if (len > 0 && (txt[len-1] == '\n' || txt[len-1] == '\r')) {
-        if (len > 1 && (txt[len-2] == '\n' || txt[len-2] == '\r')) len -= 2;
-        else len--;
-    }
-    free(txt); return len;
 }
 
 void editor_refresh_screen(Editor *E) {
@@ -297,7 +316,13 @@ void editor_refresh_screen(Editor *E) {
             for (int j = start_idx; j < vl->len && current_visual_pos < E->coloff + drawlen; j++) {
                 int char_off = (int)line_start_off + j; int color = vl->hl[j];
                 if (E->last_match_off != -1 && char_off >= E->last_match_off && char_off < E->last_match_off + E->search_match_len) color = HL_MATCH;
-                if (is_offset_selected(E, char_off)) color = HL_SELECT;
+                
+                if (is_offset_selected(E, char_off)) {
+                    if (!is_full_line_selection(E) || !isspace(vl->chars[j]) || j > get_leading_spaces(E, filerow)) {
+                        color = HL_SELECT;
+                    }
+                }
+
                 if (color != current_color) { const char *ansi = hl_to_ansi(color); abAppend(&ab, ansi, (int)strlen(ansi)); current_color = color; }
                 abAppend(&ab, &vl->chars[j], 1); current_visual_pos = vl->cx_to_rx[j+1];
             }
@@ -466,25 +491,6 @@ void editor_delete_selection(Editor *E) {
     free(text); pt_delete_fixed(E->pt, start, end - start);
     editor_move_to_offset(E, (int64_t)start);
     editor_sync_model(E); E->selecting = false; E->dirty = true;
-}
-
-static bool is_full_line_selection(Editor *E) {
-    if (!E->selecting) return false;
-    int start_y = E->sel_cy, end_y = E->cy;
-    int s_cx = E->sel_cx, e_cx = E->cx;
-    if (start_y > end_y) { int t = start_y; start_y = end_y; end_y = t; t = s_cx; s_cx = e_cx; e_cx = t; }
-    size_t last_line_len = get_line_len(E, end_y);
-    return (s_cx == 0 && e_cx >= (int)last_line_len);
-}
-
-static int get_leading_spaces(Editor *E, int y) {
-    size_t off = li_get_offset(E->li, y);
-    size_t line_len = get_line_len(E, y);
-    if (line_len == 0) return -1;
-    char *line = pt_get_text(E->pt, off, line_len);
-    int count = 0;
-    while (count < (int)line_len && line[count] == ' ') count++;
-    free(line); return count;
 }
 
 void editor_indent_selection(Editor *E, int dir) {
