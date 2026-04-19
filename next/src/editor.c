@@ -70,13 +70,17 @@ void editor_save_as(Editor *E) {
 
 static void editor_move_to_offset(Editor *E, int64_t offset) {
     int line_count = li_get_line_count(E->li);
+    if (line_count == 0) { E->cx = E->cy = 0; return; }
     for (int i = 0; i < line_count; i++) {
         size_t start = li_get_offset(E->li, i);
         size_t end = (i + 1 < line_count) ? li_get_offset(E->li, i + 1) : E->pt->total_length;
         if (offset >= (int64_t)start && offset < (int64_t)end) {
-            E->cy = i; E->cx = (int)(offset - start); break;
+            E->cy = i; E->cx = (int)(offset - start); return;
         }
     }
+    E->cy = line_count - 1;
+    size_t last_start = li_get_offset(E->li, E->cy);
+    E->cx = (int)(E->pt->total_length - last_start);
 }
 
 static int editor_find_match_index(Editor *E, const char *query, int64_t current_match_off) {
@@ -134,7 +138,7 @@ void editor_find(Editor *E) {
             } else break;
         } else if (c == '\r') break;
     }
-    if (E->last_search) { free(E->last_search); }
+    if (E->last_search) free(E->last_search);
     E->last_search = query; E->last_match_off = -1; E->search_match_len = 0;
 }
 
@@ -178,7 +182,7 @@ void editor_replace(Editor *E) {
 void editor_open_browser(Editor *E) {
     if (E->dirty) {
         char *ans = editor_prompt(E, "Unsaved changes! Open another file anyway? (y/n)", NULL);
-        if (!ans || (ans[0] != 'y' && ans[0] != 'Y')) { free(ans); return; }
+        if (!ans || (ans[0] != 'y' && ans[0] != 'Y')) { if (ans) free(ans); return; }
         free(ans);
     }
     char *selected = file_browser_open(E);
@@ -381,33 +385,52 @@ void editor_del_char(Editor *E) {
 void editor_insert_tab(Editor *E) { for (int i = 0; i < E->tab_size; i++) editor_insert_char(E, ' '); }
 
 void editor_copy(Editor *E) {
-    if (!E->selecting) return;
-    size_t start = li_get_offset(E->li, E->sel_cy) + E->sel_cx;
-    size_t end = li_get_offset(E->li, E->cy) + E->cx;
-    if (start > end) { size_t tmp = start; start = end; end = tmp; }
+    size_t start, end;
+    if (E->selecting) {
+        start = li_get_offset(E->li, E->sel_cy) + E->sel_cx;
+        end = li_get_offset(E->li, E->cy) + E->cx;
+        if (start > end) { size_t tmp = start; start = end; end = tmp; }
+    } else {
+        start = li_get_offset(E->li, E->cy);
+        if (E->cy + 1 < li_get_line_count(E->li)) end = li_get_offset(E->li, E->cy + 1);
+        else end = E->pt->total_length;
+    }
+    if (start >= end) return;
+    char *text = pt_get_text(E->pt, start, end - start);
     if (E->clipboard) free(E->clipboard);
-    E->clipboard = pt_get_text(E->pt, start, end - start);
+    E->clipboard = text;
 }
 
 void editor_cut(Editor *E) {
-    if (!E->selecting) return;
-    editor_copy(E);
-    size_t start = li_get_offset(E->li, E->sel_cy) + E->sel_cx;
-    size_t end = li_get_offset(E->li, E->cy) + E->cx;
-    if (start > end) { size_t tmp = start; start = end; end = tmp; }
-    size_t len = end - start;
-    pt_delete_fixed(E->pt, start, len);
-    editor_move_to_offset(E, start);
-    editor_sync_model(E);
-    E->selecting = false; E->dirty = true;
+    size_t start, end;
+    bool was_selecting = E->selecting;
+    if (E->selecting) {
+        start = li_get_offset(E->li, E->sel_cy) + E->sel_cx;
+        end = li_get_offset(E->li, E->cy) + E->cx;
+        if (start > end) { size_t tmp = start; start = end; end = tmp; }
+    } else {
+        start = li_get_offset(E->li, E->cy);
+        if (E->cy + 1 < li_get_line_count(E->li)) end = li_get_offset(E->li, E->cy + 1);
+        else end = E->pt->total_length;
+    }
+    if (start >= end) return;
+    char *text = pt_get_text(E->pt, start, end - start);
+    if (E->clipboard) free(E->clipboard);
+    E->clipboard = text;
+    undo_push(E->undo_stack, ACTION_DELETE, start, E->clipboard, end - start);
+    pt_delete_fixed(E->pt, start, end - start);
+    if (was_selecting) editor_move_to_offset(E, (int64_t)start);
+    else E->cx = 0;
+    editor_sync_model(E); E->selecting = false; E->dirty = true;
 }
 
 void editor_paste(Editor *E) {
     if (!E->clipboard) return;
     size_t offset = li_get_offset(E->li, E->cy) + E->cx;
     pt_insert(E->pt, offset, E->clipboard, strlen(E->clipboard));
-    editor_move_to_offset(E, offset + strlen(E->clipboard));
-    editor_sync_model(E); E->dirty = true;
+    undo_push(E->undo_stack, ACTION_INSERT, offset, E->clipboard, strlen(E->clipboard));
+    editor_sync_model(E); editor_move_to_offset(E, (int64_t)(offset + strlen(E->clipboard)));
+    E->dirty = true;
 }
 
 void editor_undo(Editor *E) {
@@ -475,7 +498,7 @@ void editor_process_keypress(Editor *E) {
         case '\r': editor_insert_newline(E); break;
         case '\t': editor_insert_tab(E); break;
         case ctrl_key('q'):
-            if (E->dirty) { char *ans = editor_prompt(E, "Unsaved changes! Quit anyway? (y/n)", NULL); if (!ans || (ans[0] != 'y' && ans[0] != 'Y')) { free(ans); break; } free(ans); }
+            if (E->dirty) { char *ans = editor_prompt(E, "Unsaved changes! Quit anyway? (y/n)", NULL); if (!ans || (ans[0] != 'y' && ans[0] != 'Y')) { if (ans) free(ans); break; } if (ans) free(ans); }
             terminal_disable_raw(&E->terminal); write(STDOUT_FILENO, "\x1b[2J\x1b[H", 7); exit(0); break;
         case ctrl_key('s'): editor_save(E); break;
         case ctrl_key('a'): editor_save_as(E); break;
