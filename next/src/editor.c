@@ -181,9 +181,7 @@ void editor_replace(Editor *E) {
 
 void editor_open_browser(Editor *E) {
     if (E->dirty) {
-        char *ans = editor_prompt(E, "Unsaved changes! Open another file anyway? (y/n)", NULL);
-        if (!ans || (ans[0] != 'y' && ans[0] != 'Y')) { if (ans) free(ans); return; }
-        free(ans);
+        if (!editor_confirm(E, "Unsaved changes! Open another file anyway? (y/n)")) return;
     }
     char *selected = file_browser_open(E);
     if (selected) { editor_load(E, selected); E->cx = E->cy = 0; E->rowoff = E->coloff = 0; free(selected); }
@@ -212,6 +210,21 @@ char *editor_prompt(Editor *E, char *prompt, void (*callback)(Editor *, char *, 
     }
 }
 
+bool editor_confirm(Editor *E, char *prompt) {
+    while (1) {
+        struct abuf ab = ABUF_INIT; char status[256];
+        int len = snprintf(status, sizeof(status), "\x1b[7m%s\x1b[m", prompt);
+        abAppend(&ab, "\x1b[?25l", 6);
+        char move_buf[32]; snprintf(move_buf, sizeof(move_buf), "\x1b[%d;1H", E->terminal.screenrows + 1);
+        abAppend(&ab, move_buf, (int)strlen(move_buf)); abAppend(&ab, status, len);
+        abAppend(&ab, "\x1b[K", 3);
+        write(STDOUT_FILENO, ab.b, ab.len); abFree(&ab);
+        char c = '\0'; if (read(STDIN_FILENO, &c, 1) <= 0) continue;
+        if (c == 'y' || c == 'Y') return true;
+        if (c == 'n' || c == 'N' || c == '\x1b') return false;
+    }
+}
+
 void editor_scroll(Editor *E) {
     if (E->cy < E->rowoff) E->rowoff = E->cy;
     if (E->cy >= E->rowoff + E->terminal.screenrows) E->rowoff = E->cy - E->terminal.screenrows + 1;
@@ -231,6 +244,20 @@ static bool is_offset_selected(Editor *E, size_t offset) {
 void editor_resize(Editor *E) {
     if (terminal_get_size(&E->terminal.screenrows, &E->terminal.screencols) == -1) return;
     E->terminal.screenrows--; vp_destroy(E->vp); E->vp = vp_create(E->terminal.screenrows);
+}
+
+static size_t get_line_len(Editor *E, int y) {
+    int line_count = li_get_line_count(E->li);
+    if (y < 0 || y >= line_count) return 0;
+    size_t start = li_get_offset(E->li, y);
+    size_t end = (y + 1 < line_count) ? li_get_offset(E->li, y + 1) : E->pt->total_length;
+    size_t len = end - start;
+    char *txt = pt_get_text(E->pt, start, len);
+    if (len > 0 && (txt[len-1] == '\n' || txt[len-1] == '\r')) {
+        if (len > 1 && (txt[len-2] == '\n' || txt[len-2] == '\r')) len -= 2;
+        else len--;
+    }
+    free(txt); return len;
 }
 
 void editor_refresh_screen(Editor *E) {
@@ -424,6 +451,66 @@ void editor_cut(Editor *E) {
     editor_sync_model(E); E->selecting = false; E->dirty = true;
 }
 
+void editor_delete_selection(Editor *E) {
+    if (!E->selecting) return;
+    size_t start = li_get_offset(E->li, E->sel_cy) + E->sel_cx;
+    size_t end = li_get_offset(E->li, E->cy) + E->cx;
+    if (start > end) { size_t tmp = start; start = end; end = tmp; }
+    if (start == end) return;
+    char *text = pt_get_text(E->pt, start, end - start);
+    undo_push(E->undo_stack, ACTION_DELETE, start, text, end - start);
+    free(text); pt_delete_fixed(E->pt, start, end - start);
+    editor_move_to_offset(E, (int64_t)start);
+    editor_sync_model(E); E->selecting = false; E->dirty = true;
+}
+
+static bool is_full_line_selection(Editor *E) {
+    if (!E->selecting) return false;
+    int start_y = E->sel_cy, end_y = E->cy;
+    int s_cx = E->sel_cx, e_cx = E->cx;
+    if (start_y > end_y) { int t = start_y; start_y = end_y; end_y = t; t = s_cx; s_cx = e_cx; e_cx = t; }
+    size_t last_line_len = get_line_len(E, end_y);
+    return (s_cx == 0 && e_cx >= (int)last_line_len);
+}
+
+void editor_indent_selection(Editor *E, int dir) {
+    if (!E->selecting) return;
+    if (!is_full_line_selection(E)) return; 
+    
+    int start_y = E->sel_cy, end_y = E->cy;
+    bool cursor_was_at_end = (E->cy >= E->sel_cy);
+    if (start_y > end_y) { int t = start_y; start_y = end_y; end_y = t; }
+    
+    for (int y = end_y; y >= start_y; y--) {
+        size_t off = li_get_offset(E->li, y);
+        if (dir == 1) {
+            char *spaces = malloc(E->tab_size + 1);
+            for(int k=0; k<E->tab_size; k++) spaces[k] = ' ';
+            spaces[E->tab_size] = '\0';
+            pt_insert(E->pt, off, spaces, E->tab_size);
+            undo_push(E->undo_stack, ACTION_INSERT, off, spaces, E->tab_size);
+            free(spaces);
+        } else {
+            size_t next_off = (y + 1 < li_get_line_count(E->li)) ? li_get_offset(E->li, y+1) : E->pt->total_length;
+            int len = (int)(next_off - off);
+            char *line = pt_get_text(E->pt, off, len);
+            int to_del = 0;
+            while (to_del < E->tab_size && to_del < len && line[to_del] == ' ') to_del++;
+            if (to_del > 0) {
+                char *txt = pt_get_text(E->pt, off, to_del);
+                undo_push(E->undo_stack, ACTION_DELETE, off, txt, to_del);
+                free(txt); pt_delete_fixed(E->pt, off, to_del);
+            }
+            free(line);
+        }
+    }
+    
+    editor_sync_model(E);
+    if (cursor_was_at_end) { E->sel_cx = 0; E->cx = (int)get_line_len(E, E->cy); }
+    else { E->cx = 0; E->sel_cx = (int)get_line_len(E, E->sel_cy); }
+    E->dirty = true;
+}
+
 void editor_paste(Editor *E) {
     if (!E->clipboard) return;
     size_t offset = li_get_offset(E->li, E->cy) + E->cx;
@@ -496,9 +583,9 @@ void editor_process_keypress(Editor *E) {
     char c; if (read(STDIN_FILENO, &c, 1) <= 0) return;
     switch (c) {
         case '\r': editor_insert_newline(E); break;
-        case '\t': editor_insert_tab(E); break;
+        case '\t': if (E->selecting) editor_indent_selection(E, 1); else editor_insert_tab(E); break;
         case ctrl_key('q'):
-            if (E->dirty) { char *ans = editor_prompt(E, "Unsaved changes! Quit anyway? (y/n)", NULL); if (!ans || (ans[0] != 'y' && ans[0] != 'Y')) { if (ans) free(ans); break; } if (ans) free(ans); }
+            if (E->dirty) { if (!editor_confirm(E, "Unsaved changes! Quit anyway? (y/n)")) break; }
             terminal_disable_raw(&E->terminal); write(STDOUT_FILENO, "\x1b[2J\x1b[H", 7); exit(0); break;
         case ctrl_key('s'): editor_save(E); break;
         case ctrl_key('a'): editor_save_as(E); break;
@@ -514,7 +601,7 @@ void editor_process_keypress(Editor *E) {
         case ctrl_key('x'): editor_cut(E); break;
         case ctrl_key('v'): editor_paste(E); break;
         case ctrl_key('n'): E->show_line_numbers = !E->show_line_numbers; break;
-        case 127: editor_delete_char(E); break;
+        case 127: if (E->selecting) editor_indent_selection(E, -1); else editor_delete_char(E); break;
         case '\x1b': {
             char seq[5]; if (read(STDIN_FILENO, &seq[0], 1) != 1) break;
             if (seq[0] == 'O') {
@@ -527,7 +614,7 @@ void editor_process_keypress(Editor *E) {
                     if (seq[2] == ';') {
                         if (read(STDIN_FILENO, &seq[3], 1) != 1) break; if (read(STDIN_FILENO, &seq[4], 1) != 1) break;
                         if (seq[3] == '2') { if (!E->selecting) { E->selecting = true; E->sel_cx = E->cx; E->sel_cy = E->cy; } editor_move_cursor(E, seq[4]); }
-                    } else if (seq[2] == '~' && seq[1] == '3') editor_del_char(E);
+                    } else if (seq[2] == '~' && seq[1] == '3') { if (E->selecting) editor_delete_selection(E); else editor_del_char(E); }
                 } else { E->selecting = false; editor_move_cursor(E, seq[1]); }
             }
             break;
