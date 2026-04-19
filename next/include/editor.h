@@ -6,8 +6,9 @@
 #include "viewport.h"
 #include "terminal.h"
 #include "undo.h"
+#include "highlight.h"
 
-#define EDITOR_VERSION "2.0.0"
+#define EDITOR_VERSION "2.2.0"
 
 typedef struct {
     int cx, cy;      // Logical byte offset in line, logical row index
@@ -25,8 +26,10 @@ typedef struct {
     char *clipboard;
 
     bool show_line_numbers;
+    int tab_size;
     bool dirty;
     
+    EditorSyntax *syntax;
     PieceTable *pt;
     LineIndex *li;
     Viewport *vp;
@@ -48,5 +51,6 @@ void editor_replace(Editor *E);
 void editor_open_browser(Editor *E);
 void editor_undo(Editor *E);
 void editor_redo(Editor *E);
+void editor_toggle_comment(Editor *E);
 
 #endif

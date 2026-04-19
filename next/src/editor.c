@@ -25,7 +25,9 @@ void editor_init(Editor *E) {
     E->selecting = false;
     E->clipboard = NULL;
     E->show_line_numbers = true;
+    E->tab_size = 4;
     E->dirty = false;
+    E->syntax = NULL;
     E->pt = pt_create("", 0);
     E->li = li_create();
     E->undo_stack = undo_create();
@@ -43,6 +45,7 @@ static void editor_sync_model(Editor *E) {
 void editor_load(Editor *E, const char *filename) {
     if (E->filename) free(E->filename);
     E->filename = strdup(filename);
+    E->syntax = hl_get_syntax(filename);
     if (E->pt) pt_destroy(E->pt);
     E->pt = pt_open(filename);
     editor_sync_model(E);
@@ -59,6 +62,7 @@ void editor_save_as(Editor *E) {
     if (new_name) {
         if (E->filename) free(E->filename);
         E->filename = strdup(new_name);
+        E->syntax = hl_get_syntax(new_name);
         if (pt_save(E->pt, E->filename)) E->dirty = false;
         free(new_name);
     }
@@ -130,7 +134,8 @@ void editor_find(Editor *E) {
             } else break;
         } else if (c == '\r') break;
     }
-    if (E->last_search) free(E->last_search); E->last_search = query; E->last_match_off = -1; E->search_match_len = 0;
+    if (E->last_search) { free(E->last_search); }
+    E->last_search = query; E->last_match_off = -1; E->search_match_len = 0;
 }
 
 void editor_replace(Editor *E) {
@@ -191,7 +196,8 @@ char *editor_prompt(Editor *E, char *prompt, void (*callback)(Editor *, char *, 
         abAppend(&ab, "\x1b[K", 3); abAppend(&ab, "\x1b[?25h", 6);
         write(STDOUT_FILENO, ab.b, ab.len); abFree(&ab);
         char c = '\0'; int nread = read(STDIN_FILENO, &c, 1);
-        if (nread == -1) return NULL; if (nread == 0) continue;
+        if (nread == -1) { free(buf); return NULL; }
+        if (nread == 0) continue;
         if (c == '\r') { if (buflen != 0) return buf; }
         else if (c == '\x1b') { free(buf); return NULL; }
         else if (c == 127) { if (buflen != 0) buf[--buflen] = '\0'; }
@@ -225,6 +231,10 @@ void editor_resize(Editor *E) {
 
 void editor_refresh_screen(Editor *E) {
     editor_scroll(E); vp_sync(E->vp, E->pt, E->li, E->rowoff);
+    for (int i = 0; i < E->terminal.screenrows; i++) {
+        ViewLine *vl = &E->vp->lines[i];
+        hl_apply(vl->chars, vl->len, vl->hl, E->syntax);
+    }
     int v_idx = E->cy - E->rowoff;
     if (v_idx >= 0 && v_idx < E->terminal.screenrows) {
         ViewLine *vl = &E->vp->lines[v_idx];
@@ -260,11 +270,12 @@ void editor_refresh_screen(Editor *E) {
         }
         abAppend(&ab, "\x1b[K\r\n", 5);
     }
-    abAppend(&ab, "\x1b[7m", 4);
+    abAppend(&ab, "\x1b[m", 3); abAppend(&ab, "\x1b[7m", 4);
     char status[128], rstatus[64];
     const char *display_name = E->filename ? strrchr(E->filename, '/') : NULL;
     display_name = display_name ? display_name + 1 : (E->filename ? E->filename : "[No Name]");
-    int len = snprintf(status, sizeof(status), " %s - %d lines %s", display_name, li_get_line_count(E->li), E->dirty ? "(modified)" : "");
+    const char *ftype = E->syntax ? E->syntax->filetype : "no ft";
+    int len = snprintf(status, sizeof(status), " %s - %d lines (%s) %s", display_name, li_get_line_count(E->li), ftype, E->dirty ? "(modified)" : "");
     int rstatus_len = snprintf(rstatus, sizeof(rstatus), "LN: %s %d:%d ", E->show_line_numbers ? "ON" : "OFF", E->cy + 1, E->rx + 1);
     if (len > E->terminal.screencols) len = E->terminal.screencols;
     abAppend(&ab, status, len);
@@ -290,25 +301,67 @@ void editor_move_cursor(Editor *E, int key) {
 
 void editor_insert_char(Editor *E, int c) {
     size_t offset = li_get_offset(E->li, E->cy) + E->cx;
-    char ch = (char)c; pt_insert(E->pt, offset, &ch, 1);
+    char ch = (char)c;
+    char paired = 0;
+    if (ch == '(') paired = ')';
+    else if (ch == '[') paired = ']';
+    else if (ch == '{') paired = '}';
+    else if (ch == '"') paired = '"';
+    else if (ch == '\'') paired = '\'';
+    if (paired) {
+        char buf[2] = {ch, paired}; pt_insert(E->pt, offset, buf, 2);
+        undo_push(E->undo_stack, ACTION_INSERT, offset, buf, 2);
+        editor_sync_model(E); E->cx++; E->dirty = true; return;
+    }
+    if (ch == ')' || ch == ']' || ch == '}' || ch == '"' || ch == '\'') {
+        size_t next_off = li_get_offset(E->li, E->cy) + E->cx;
+        if (next_off < E->pt->total_length) {
+            char *next_c = pt_get_text(E->pt, next_off, 1);
+            if (next_c && next_c[0] == ch) { free(next_c); E->cx++; return; }
+            if (next_c) free(next_c);
+        }
+    }
+    pt_insert(E->pt, offset, &ch, 1);
     undo_push(E->undo_stack, ACTION_INSERT, offset, &ch, 1);
     editor_sync_model(E); E->cx++; E->dirty = true;
 }
 
 void editor_insert_newline(Editor *E) {
     size_t offset = li_get_offset(E->li, E->cy) + E->cx;
-    char nl = '\n'; pt_insert(E->pt, offset, &nl, 1);
-    undo_push(E->undo_stack, ACTION_INSERT, offset, &nl, 1);
-    editor_sync_model(E); E->cy++; E->cx = 0; E->dirty = true;
+    size_t line_start = li_get_offset(E->li, E->cy);
+    size_t line_len = E->cx;
+    char *line_text = pt_get_text(E->pt, line_start, line_len);
+    int indent_len = 0;
+    while (indent_len < (int)line_len && (line_text[indent_len] == ' ' || line_text[indent_len] == '\t')) indent_len++;
+    char *nl_with_indent = malloc(indent_len + 2);
+    nl_with_indent[0] = '\n'; if (indent_len > 0) memcpy(nl_with_indent + 1, line_text, indent_len);
+    nl_with_indent[indent_len + 1] = '\0';
+    pt_insert(E->pt, offset, nl_with_indent, indent_len + 1);
+    undo_push(E->undo_stack, ACTION_INSERT, offset, nl_with_indent, indent_len + 1);
+    free(line_text); free(nl_with_indent); editor_sync_model(E);
+    E->cy++; E->cx = indent_len; E->dirty = true;
 }
 
 void editor_delete_char(Editor *E) {
     if (E->cx == 0 && E->cy == 0) return;
     size_t offset = li_get_offset(E->li, E->cy) + E->cx;
+    if (E->cx > 0) {
+        size_t line_start = li_get_offset(E->li, E->cy);
+        char *before = pt_get_text(E->pt, line_start, E->cx);
+        bool all_spaces = true;
+        for (int i = 0; i < E->cx; i++) if (before[i] != ' ') { all_spaces = false; break; }
+        if (all_spaces && (E->cx > 0 && E->cx % E->tab_size == 0)) {
+            int to_del = E->tab_size;
+            char *deleted_text = pt_get_text(E->pt, offset - to_del, to_del);
+            undo_push(E->undo_stack, ACTION_DELETE, offset - to_del, deleted_text, to_del);
+            free(deleted_text); pt_delete_fixed(E->pt, offset - to_del, to_del);
+            E->cx -= to_del; free(before); editor_sync_model(E); E->dirty = true; return;
+        }
+        free(before);
+    }
     char *deleted_text = pt_get_text(E->pt, offset - 1, 1);
     undo_push(E->undo_stack, ACTION_DELETE, offset - 1, deleted_text, 1);
-    free(deleted_text);
-    pt_delete_fixed(E->pt, offset - 1, 1);
+    free(deleted_text); pt_delete_fixed(E->pt, offset - 1, 1);
     if (E->cx > 0) E->cx--;
     else { E->cy--; editor_sync_model(E); vp_sync(E->vp, E->pt, E->li, E->rowoff); int v_idx = E->cy - E->rowoff; if (v_idx >= 0 && v_idx < E->terminal.screenrows) E->cx = E->vp->lines[v_idx].len; }
     editor_sync_model(E); E->dirty = true;
@@ -321,12 +374,11 @@ void editor_del_char(Editor *E) {
     size_t offset = li_get_offset(E->li, E->cy) + E->cx;
     char *deleted_text = pt_get_text(E->pt, offset, 1);
     undo_push(E->undo_stack, ACTION_DELETE, offset, deleted_text, 1);
-    free(deleted_text);
-    pt_delete_fixed(E->pt, offset, 1);
+    free(deleted_text); pt_delete_fixed(E->pt, offset, 1);
     editor_sync_model(E); E->dirty = true;
 }
 
-void editor_insert_tab(Editor *E) { for (int i = 0; i < 4; i++) editor_insert_char(E, ' '); }
+void editor_insert_tab(Editor *E) { for (int i = 0; i < E->tab_size; i++) editor_insert_char(E, ' '); }
 
 void editor_copy(Editor *E) {
     if (!E->selecting) return;
@@ -372,6 +424,51 @@ void editor_redo(Editor *E) {
     editor_sync_model(E); E->dirty = true;
 }
 
+static bool is_line_blank(Editor *E, int y) {
+    size_t off = li_get_offset(E->li, y);
+    size_t next_off = (y + 1 < li_get_line_count(E->li)) ? li_get_offset(E->li, y+1) : E->pt->total_length;
+    int len = (int)(next_off - off);
+    if (len <= 0) return true;
+    char *text = pt_get_text(E->pt, off, len);
+    bool blank = true;
+    for (int i = 0; i < len; i++) {
+        if (text[i] != '\n' && text[i] != '\r' && !isspace(text[i])) { blank = false; break; }
+    }
+    free(text); return blank;
+}
+
+void editor_toggle_comment(Editor *E) {
+    if (!E->syntax || !E->syntax->singleline_comment_start) return;
+    int start_y = E->sel_cy, end_y = E->cy;
+    if (start_y > end_y) { int t = start_y; start_y = end_y; end_y = t; }
+    char *cs = E->syntax->singleline_comment_start;
+    int cslen = strlen(cs);
+    bool should_comment = false;
+    for (int y = start_y; y <= end_y; y++) {
+        if (is_line_blank(E, y)) continue;
+        size_t off = li_get_offset(E->li, y);
+        char *prefix = pt_get_text(E->pt, off, cslen);
+        if (!prefix || strncmp(prefix, cs, cslen) != 0) should_comment = true;
+        free(prefix); if (should_comment) break;
+    }
+    for (int y = end_y; y >= start_y; y--) {
+        if (is_line_blank(E, y)) continue;
+        size_t off = li_get_offset(E->li, y);
+        if (should_comment) {
+            pt_insert(E->pt, off, cs, cslen);
+            undo_push(E->undo_stack, ACTION_INSERT, off, cs, cslen);
+        } else {
+            char *prefix = pt_get_text(E->pt, off, cslen);
+            if (prefix && strncmp(prefix, cs, cslen) == 0) {
+                undo_push(E->undo_stack, ACTION_DELETE, off, prefix, cslen);
+                pt_delete_fixed(E->pt, off, cslen);
+            }
+            free(prefix);
+        }
+    }
+    editor_sync_model(E); E->dirty = true;
+}
+
 void editor_process_keypress(Editor *E) {
     char c; if (read(STDIN_FILENO, &c, 1) <= 0) return;
     switch (c) {
@@ -412,6 +509,8 @@ void editor_process_keypress(Editor *E) {
             }
             break;
         }
-        default: if (!iscntrl(c)) { E->selecting = false; editor_insert_char(E, c); } break;
+        default: 
+            if (c == '/' && E->selecting) { editor_toggle_comment(E); E->selecting = false; break; }
+            if (!iscntrl(c)) { E->selecting = false; editor_insert_char(E, c); } break;
     }
 }

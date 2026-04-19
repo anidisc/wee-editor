@@ -58,7 +58,6 @@ void vp_sync(Viewport *vp, PieceTable *pt, LineIndex *li, int rowoff) {
             vl->len = len;
 
             vl->hl = malloc(len);
-            hl_apply(vl->chars, len, vl->hl);
 
             vl->cx_to_rx = malloc(sizeof(int) * (len + 1));
             int rx = 0;
