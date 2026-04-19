@@ -22,11 +22,14 @@ static size_t get_line_len(Editor *E, int y) {
     size_t end = (y + 1 < line_count) ? li_get_offset(E->li, y + 1) : E->pt->total_length;
     size_t len = end - start;
     char *txt = pt_get_text(E->pt, start, len);
-    if (len > 0 && (txt[len-1] == '\n' || txt[len-1] == '\r')) {
-        if (len > 1 && (txt[len-2] == '\n' || txt[len-2] == '\r')) len -= 2;
-        else len--;
+    if (len > 0 && txt) {
+        if (txt[len-1] == '\n' || txt[len-1] == '\r') {
+            if (len > 1 && (txt[len-2] == '\n' || txt[len-2] == '\r')) len -= 2;
+            else len--;
+        }
     }
-    free(txt); return len;
+    if (txt) free(txt);
+    return len;
 }
 
 static int get_leading_spaces(Editor *E, int y) {
@@ -36,14 +39,18 @@ static int get_leading_spaces(Editor *E, int y) {
     char *line = pt_get_text(E->pt, off, line_len);
     int count = 0;
     while (count < (int)line_len && line[count] == ' ') count++;
-    free(line); return count;
+    free(line);
+    return count;
 }
 
 static bool is_full_line_selection(Editor *E) {
     if (!E->selecting) return false;
     int start_y = E->sel_cy, end_y = E->cy;
     int s_cx = E->sel_cx, e_cx = E->cx;
-    if (start_y > end_y) { int t = start_y; start_y = end_y; end_y = t; t = s_cx; s_cx = e_cx; e_cx = t; }
+    if (start_y > end_y) {
+        int t = start_y; start_y = end_y; end_y = t;
+        t = s_cx; s_cx = e_cx; e_cx = t;
+    }
     size_t last_line_len = get_line_len(E, end_y);
     return (s_cx == 0 && e_cx >= (int)last_line_len);
 }
@@ -184,7 +191,9 @@ void editor_find(Editor *E) {
         } else if (c == '\r') break;
     }
     if (E->last_search) { free(E->last_search); }
-    E->last_search = query; E->last_match_off = -1; E->search_match_len = 0;
+    E->last_search = query;
+    E->last_match_off = -1;
+    E->search_match_len = 0;
 }
 
 void editor_replace(Editor *E) {
@@ -312,13 +321,26 @@ void editor_refresh_screen(Editor *E) {
             int drawlen = vl->visual_len - E->coloff; int effective_cols = E->terminal.screencols - (E->show_line_numbers ? ln_width + 1 : 0);
             if (drawlen > effective_cols) drawlen = effective_cols;
             int start_idx = 0; while (start_idx < vl->len && vl->cx_to_rx[start_idx] < E->coloff) start_idx++;
+            
+            int first_code = -1, last_code = -1;
+            for (int k = 0; k < vl->len; k++) {
+                if (!isspace((unsigned char)vl->chars[k])) {
+                    if (first_code == -1) first_code = k;
+                    last_code = k;
+                }
+            }
+
             int current_color = -1; int current_visual_pos = vl->cx_to_rx[start_idx];
             for (int j = start_idx; j < vl->len && current_visual_pos < E->coloff + drawlen; j++) {
                 int char_off = (int)line_start_off + j; int color = vl->hl[j];
                 if (E->last_match_off != -1 && char_off >= E->last_match_off && char_off < E->last_match_off + E->search_match_len) color = HL_MATCH;
                 
-                if (is_offset_selected(E, char_off)) {
-                    if (!is_full_line_selection(E) || !isspace(vl->chars[j]) || j > get_leading_spaces(E, filerow)) {
+                if (is_offset_selected(E, (size_t)char_off)) {
+                    if (E->cy != E->sel_cy) {
+                        if (first_code != -1 && j >= first_code && j <= last_code) {
+                            color = HL_SELECT;
+                        }
+                    } else {
                         color = HL_SELECT;
                     }
                 }
@@ -326,7 +348,7 @@ void editor_refresh_screen(Editor *E) {
                 if (color != current_color) { const char *ansi = hl_to_ansi(color); abAppend(&ab, ansi, (int)strlen(ansi)); current_color = color; }
                 abAppend(&ab, &vl->chars[j], 1); current_visual_pos = vl->cx_to_rx[j+1];
             }
-            abAppend(&ab, "\x1b[39;49m", 7);
+            abAppend(&ab, "\x1b[m", 3); // FULL RESET before clearing to avoid right-side bleeding
         }
         abAppend(&ab, "\x1b[K\r\n", 5);
     }
@@ -634,7 +656,8 @@ void editor_process_keypress(Editor *E) {
                 if (seq[1] >= '0' && seq[1] <= '9') {
                     if (read(STDIN_FILENO, &seq[2], 1) != 1) break;
                     if (seq[2] == ';') {
-                        if (read(STDIN_FILENO, &seq[3], 1) != 1) break; if (read(STDIN_FILENO, &seq[4], 1) != 1) break;
+                        if (read(STDIN_FILENO, &seq[3], 1) != 1) break;
+                        if (read(STDIN_FILENO, &seq[4], 1) != 1) break;
                         if (seq[3] == '2') { if (!E->selecting) { E->selecting = true; E->sel_cx = E->cx; E->sel_cy = E->cy; } editor_move_cursor(E, seq[4]); }
                     } else if (seq[2] == '~' && seq[1] == '3') { if (E->selecting) editor_delete_selection(E); else editor_del_char(E); }
                 } else { E->selecting = false; editor_move_cursor(E, seq[1]); }
