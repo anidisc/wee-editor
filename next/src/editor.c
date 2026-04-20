@@ -249,7 +249,7 @@ void editor_find(Editor *E) {
             } else break;
         } else if (c == '\r') break;
     }
-    if (E->last_search) free(E->last_search);
+    if (E->last_search) { free(E->last_search); }
     E->last_search = query; E->last_match_off = -1; E->search_match_len = 0;
 }
 
@@ -643,6 +643,11 @@ void editor_process_keypress(Editor *E) {
         case ctrl_key('r'): editor_replace(E); break;
         case ctrl_key('o'): editor_open_browser(E); break;
         case ctrl_key('h'): editor_show_help(E); break;
+        case ctrl_key('l'):
+            if (!E->selecting) { E->selecting = true; E->sel_cy = E->cy; E->sel_cx = 0; }
+            if (E->cy < li_get_line_count(E->li) - 1) { E->cy++; E->cx = 0; }
+            else E->cx = (int)get_line_len(E, E->cy);
+            break;
         case ctrl_key('g'): if (E->last_search) editor_find_next(E, E->last_search, 1); break;
         case ctrl_key('p'): if (E->last_search) editor_find_next(E, E->last_search, -1); break;
         case ctrl_key('z'): editor_undo(E); break;
