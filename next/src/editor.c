@@ -85,6 +85,19 @@ static void editor_sync_model(Editor *E) {
     free(text);
 }
 
+static bool is_line_blank(Editor *E, int y) {
+    size_t off = li_get_offset(E->li, y);
+    size_t next_off = (y + 1 < li_get_line_count(E->li)) ? li_get_offset(E->li, y+1) : E->pt->total_length;
+    int len = (int)(next_off - off);
+    if (len <= 0) return true;
+    char *text = pt_get_text(E->pt, off, len);
+    bool blank = true;
+    for (int i = 0; i < len; i++) {
+        if (text[i] != '\n' && text[i] != '\r' && !isspace((unsigned char)text[i])) { blank = false; break; }
+    }
+    free(text); return blank;
+}
+
 /* --- EDITOR CORE --- */
 
 void editor_init(Editor *E) {
@@ -288,6 +301,21 @@ void editor_replace(Editor *E) {
         else break;
     }
     E->last_match_off = -1; E->search_match_len = 0; free(query); free(replacement);
+}
+
+void editor_goto_line(Editor *E) {
+    int total_lines = li_get_line_count(E->li);
+    char prompt[128];
+    snprintf(prompt, sizeof(prompt), "Go to line (1-%d)", total_lines);
+    char *input = editor_prompt(E, prompt, NULL);
+    if (input) {
+        int line = atoi(input);
+        if (line < 1) line = 1;
+        if (line > total_lines) line = total_lines;
+        E->cy = line - 1;
+        E->cx = 0;
+        free(input);
+    }
 }
 
 void editor_open_browser(Editor *E) {
@@ -523,11 +551,9 @@ void editor_delete_selection(Editor *E) {
 void editor_indent_selection(Editor *E, int dir) {
     if (!E->selecting) return;
     if (!is_full_line_selection(E)) return;
-    
     int start_y = E->sel_cy, end_y = E->cy;
     bool cursor_was_at_end = (E->cy >= E->sel_cy);
     if (start_y > end_y) { int t = start_y; start_y = end_y; end_y = t; }
-
     int min_indent = 1000;
     if (dir == -1) {
         for (int y = start_y; y <= end_y; y++) {
@@ -537,9 +563,7 @@ void editor_indent_selection(Editor *E, int dir) {
         }
         if (min_indent == 1000 || min_indent == 0) return;
     }
-
     int to_move = (dir == 1) ? E->tab_size : (min_indent < E->tab_size ? min_indent : E->tab_size);
-
     for (int y = end_y; y >= start_y; y--) {
         size_t off = li_get_offset(E->li, y);
         if (dir == 1) {
@@ -553,7 +577,6 @@ void editor_indent_selection(Editor *E, int dir) {
             free(txt); pt_delete_fixed(E->pt, off, to_move);
         }
     }
-    
     editor_sync_model(E);
     if (cursor_was_at_end) { E->sel_cx = 0; E->cx = (int)get_line_len(E, E->cy); }
     else { E->cx = 0; E->sel_cx = (int)get_line_len(E, E->sel_cy); }
@@ -581,19 +604,6 @@ void editor_redo(Editor *E) {
     if (a->type == ACTION_INSERT) pt_insert(E->pt, a->offset, a->data, a->len);
     else pt_delete_fixed(E->pt, a->offset, a->len);
     editor_sync_model(E); E->dirty = true;
-}
-
-static bool is_line_blank(Editor *E, int y) {
-    size_t off = li_get_offset(E->li, y);
-    size_t next_off = (y + 1 < li_get_line_count(E->li)) ? li_get_offset(E->li, y+1) : E->pt->total_length;
-    int len = (int)(next_off - off);
-    if (len <= 0) return true;
-    char *text = pt_get_text(E->pt, off, len);
-    bool blank = true;
-    for (int i = 0; i < len; i++) {
-        if (text[i] != '\n' && text[i] != '\r' && !isspace(text[i])) { blank = false; break; }
-    }
-    free(text); return blank;
 }
 
 void editor_toggle_comment(Editor *E) {
@@ -641,6 +651,7 @@ void editor_process_keypress(Editor *E) {
         case ctrl_key('a'): editor_save_as(E); break;
         case ctrl_key('f'): editor_find(E); break;
         case ctrl_key('r'): editor_replace(E); break;
+        case ctrl_key('j'): editor_goto_line(E); break;
         case ctrl_key('o'): editor_open_browser(E); break;
         case ctrl_key('h'): editor_show_help(E); break;
         case ctrl_key('l'):

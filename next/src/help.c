@@ -16,6 +16,7 @@ static const char *help_text[] = {
     "n / N          : Find next / previous (after search)",
     "CTRL + o       : Open File Browser",
     "CTRL + w       : New File",
+    "CTRL + j       : Go to Line",
 
     "",
     "EDITING",
