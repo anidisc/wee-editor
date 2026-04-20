@@ -8,7 +8,7 @@
 #include "undo.h"
 #include "highlight.h"
 
-#define EDITOR_VERSION "2.8.0"
+#define EDITOR_VERSION "2.9.0"
 
 typedef struct {
     int cx, cy;      // Logical byte offset in line, logical row index
@@ -38,6 +38,7 @@ typedef struct {
 } Editor;
 
 void editor_init(Editor *E);
+void editor_new_file(Editor *E);
 void editor_load(Editor *E, const char *filename);
 void editor_refresh_screen(Editor *E);
 void editor_resize(Editor *E);

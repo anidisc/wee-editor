@@ -10,6 +10,7 @@
 #include <unistd.h>
 #include <ctype.h>
 #include <string.h>
+#include <fcntl.h>
 
 #define ctrl_key(k) ((k) & 0x1f)
 
@@ -63,6 +64,27 @@ static bool is_offset_selected(Editor *E, size_t offset) {
     return offset >= start && offset < end;
 }
 
+static void editor_move_to_offset(Editor *E, int64_t offset) {
+    int line_count = li_get_line_count(E->li);
+    if (line_count == 0) { E->cx = E->cy = 0; return; }
+    for (int i = 0; i < line_count; i++) {
+        size_t start = li_get_offset(E->li, i);
+        size_t end = (i + 1 < line_count) ? li_get_offset(E->li, i + 1) : E->pt->total_length;
+        if (offset >= (int64_t)start && offset < (int64_t)end) {
+            E->cy = i; E->cx = (int)(offset - start); return;
+        }
+    }
+    E->cy = line_count - 1;
+    size_t last_start = li_get_offset(E->li, E->cy);
+    E->cx = (int)(E->pt->total_length - last_start);
+}
+
+static void editor_sync_model(Editor *E) {
+    char *text = pt_get_text(E->pt, 0, E->pt->total_length);
+    li_rebuild(E->li, text, E->pt->total_length);
+    free(text);
+}
+
 /* --- EDITOR CORE --- */
 
 void editor_init(Editor *E) {
@@ -88,10 +110,35 @@ void editor_init(Editor *E) {
     E->vp = vp_create(E->terminal.screenrows);
 }
 
-static void editor_sync_model(Editor *E) {
-    char *text = pt_get_text(E->pt, 0, E->pt->total_length);
-    li_rebuild(E->li, text, E->pt->total_length);
-    free(text);
+bool editor_confirm(Editor *E, char *prompt) {
+    while (1) {
+        struct abuf ab = ABUF_INIT; char status[256];
+        int len = snprintf(status, sizeof(status), "\x1b[7m%s\x1b[m", prompt);
+        abAppend(&ab, "\x1b[?25l", 6);
+        char move_buf[32]; snprintf(move_buf, sizeof(move_buf), "\x1b[%d;1H", E->terminal.screenrows + 1);
+        abAppend(&ab, move_buf, (int)strlen(move_buf)); abAppend(&ab, status, len);
+        abAppend(&ab, "\x1b[K", 3);
+        write(STDOUT_FILENO, ab.b, ab.len); abFree(&ab);
+        char c = '\0'; if (read(STDIN_FILENO, &c, 1) <= 0) continue;
+        if (c == 'y' || c == 'Y') return true;
+        if (c == 'n' || c == 'N' || c == '\x1b') return false;
+    }
+}
+
+void editor_new_file(Editor *E) {
+    if (E->dirty) {
+        if (!editor_confirm(E, "Unsaved changes! Discard and create new file? (y/n)")) return;
+    }
+    if (E->filename) { free(E->filename); E->filename = NULL; }
+    if (E->pt) pt_destroy(E->pt);
+    if (E->li) li_destroy(E->li);
+    if (E->undo_stack) undo_destroy(E->undo_stack);
+    E->pt = pt_create("", 0);
+    E->li = li_create();
+    E->undo_stack = undo_create();
+    E->cx = E->cy = 0; E->rowoff = E->coloff = 0;
+    E->dirty = false; E->syntax = NULL;
+    editor_sync_model(E);
 }
 
 void editor_load(Editor *E, const char *filename) {
@@ -104,14 +151,36 @@ void editor_load(Editor *E, const char *filename) {
     E->dirty = false;
 }
 
-void editor_save(Editor *E) {
-    if (E->filename == NULL) { editor_save_as(E); return; }
-    if (pt_save(E->pt, E->filename)) E->dirty = false;
+char *editor_prompt(Editor *E, char *prompt, void (*callback)(Editor *, char *, int)) {
+    size_t bufsize = 128; char *buf = malloc(bufsize); size_t buflen = 0; buf[0] = '\0';
+    while (1) {
+        struct abuf ab = ABUF_INIT; char status[256];
+        int len = snprintf(status, sizeof(status), "\x1b[7m%s: %s\x1b[m", prompt, buf);
+        abAppend(&ab, "\x1b[?25l", 6);
+        char move_buf[32]; snprintf(move_buf, sizeof(move_buf), "\x1b[%d;1H", E->terminal.screenrows + 1);
+        abAppend(&ab, move_buf, (int)strlen(move_buf)); abAppend(&ab, status, len);
+        abAppend(&ab, "\x1b[K", 3); abAppend(&ab, "\x1b[?25h", 6);
+        write(STDOUT_FILENO, ab.b, ab.len); abFree(&ab);
+        char c = '\0'; int nread = read(STDIN_FILENO, &c, 1);
+        if (nread == -1) { free(buf); return NULL; }
+        if (nread == 0) continue;
+        if (c == '\r') { if (buflen != 0) return buf; }
+        else if (c == '\x1b') { free(buf); return NULL; }
+        else if (c == 127) { if (buflen != 0) buf[--buflen] = '\0'; }
+        else if (!iscntrl(c)) {
+            if (buflen == bufsize - 1) { bufsize *= 2; buf = realloc(buf, bufsize); }
+            buf[buflen++] = c; buf[buflen] = '\0'; if (callback) callback(E, buf, c);
+        }
+    }
 }
 
 void editor_save_as(Editor *E) {
     char *new_name = editor_prompt(E, "Save as", NULL);
     if (new_name) {
+        if (access(new_name, F_OK) == 0) {
+            char msg[256]; snprintf(msg, sizeof(msg), "File '%s' already exists. Overwrite? (y/n)", new_name);
+            if (!editor_confirm(E, msg)) { free(new_name); return; }
+        }
         if (E->filename) free(E->filename);
         E->filename = strdup(new_name);
         E->syntax = hl_get_syntax(new_name);
@@ -120,19 +189,9 @@ void editor_save_as(Editor *E) {
     }
 }
 
-static void editor_move_to_offset(Editor *E, int64_t offset) {
-    int line_count = li_get_line_count(E->li);
-    if (line_count == 0) { E->cx = E->cy = 0; return; }
-    for (int i = 0; i < line_count; i++) {
-        size_t start = li_get_offset(E->li, i);
-        size_t end = (i + 1 < line_count) ? li_get_offset(E->li, i + 1) : E->pt->total_length;
-        if (offset >= (int64_t)start && offset < (int64_t)end) {
-            E->cy = i; E->cx = (int)(offset - start); return;
-        }
-    }
-    E->cy = line_count - 1;
-    size_t last_start = li_get_offset(E->li, E->cy);
-    E->cx = (int)(E->pt->total_length - last_start);
+void editor_save(Editor *E) {
+    if (E->filename == NULL) { editor_save_as(E); return; }
+    if (pt_save(E->pt, E->filename)) E->dirty = false;
 }
 
 static int editor_find_match_index(Editor *E, const char *query, int64_t current_match_off) {
@@ -190,10 +249,8 @@ void editor_find(Editor *E) {
             } else break;
         } else if (c == '\r') break;
     }
-    if (E->last_search) { free(E->last_search); }
-    E->last_search = query;
-    E->last_match_off = -1;
-    E->search_match_len = 0;
+    if (E->last_search) free(E->last_search);
+    E->last_search = query; E->last_match_off = -1; E->search_match_len = 0;
 }
 
 void editor_replace(Editor *E) {
@@ -241,44 +298,6 @@ void editor_open_browser(Editor *E) {
     if (selected) { editor_load(E, selected); E->cx = E->cy = 0; E->rowoff = E->coloff = 0; free(selected); }
 }
 
-char *editor_prompt(Editor *E, char *prompt, void (*callback)(Editor *, char *, int)) {
-    size_t bufsize = 128; char *buf = malloc(bufsize); size_t buflen = 0; buf[0] = '\0';
-    while (1) {
-        struct abuf ab = ABUF_INIT; char status[256];
-        int len = snprintf(status, sizeof(status), "\x1b[7m%s: %s\x1b[m", prompt, buf);
-        abAppend(&ab, "\x1b[?25l", 6);
-        char move_buf[32]; snprintf(move_buf, sizeof(move_buf), "\x1b[%d;1H", E->terminal.screenrows + 1);
-        abAppend(&ab, move_buf, (int)strlen(move_buf)); abAppend(&ab, status, len);
-        abAppend(&ab, "\x1b[K", 3); abAppend(&ab, "\x1b[?25h", 6);
-        write(STDOUT_FILENO, ab.b, ab.len); abFree(&ab);
-        char c = '\0'; int nread = read(STDIN_FILENO, &c, 1);
-        if (nread == -1) { free(buf); return NULL; }
-        if (nread == 0) continue;
-        if (c == '\r') { if (buflen != 0) return buf; }
-        else if (c == '\x1b') { free(buf); return NULL; }
-        else if (c == 127) { if (buflen != 0) buf[--buflen] = '\0'; }
-        else if (!iscntrl(c)) {
-            if (buflen == bufsize - 1) { bufsize *= 2; buf = realloc(buf, bufsize); }
-            buf[buflen++] = c; buf[buflen] = '\0'; if (callback) callback(E, buf, c);
-        }
-    }
-}
-
-bool editor_confirm(Editor *E, char *prompt) {
-    while (1) {
-        struct abuf ab = ABUF_INIT; char status[256];
-        int len = snprintf(status, sizeof(status), "\x1b[7m%s\x1b[m", prompt);
-        abAppend(&ab, "\x1b[?25l", 6);
-        char move_buf[32]; snprintf(move_buf, sizeof(move_buf), "\x1b[%d;1H", E->terminal.screenrows + 1);
-        abAppend(&ab, move_buf, (int)strlen(move_buf)); abAppend(&ab, status, len);
-        abAppend(&ab, "\x1b[K", 3);
-        write(STDOUT_FILENO, ab.b, ab.len); abFree(&ab);
-        char c = '\0'; if (read(STDIN_FILENO, &c, 1) <= 0) continue;
-        if (c == 'y' || c == 'Y') return true;
-        if (c == 'n' || c == 'N' || c == '\x1b') return false;
-    }
-}
-
 void editor_scroll(Editor *E) {
     if (E->cy < E->rowoff) E->rowoff = E->cy;
     if (E->cy >= E->rowoff + E->terminal.screenrows) E->rowoff = E->cy - E->terminal.screenrows + 1;
@@ -321,34 +340,20 @@ void editor_refresh_screen(Editor *E) {
             int drawlen = vl->visual_len - E->coloff; int effective_cols = E->terminal.screencols - (E->show_line_numbers ? ln_width + 1 : 0);
             if (drawlen > effective_cols) drawlen = effective_cols;
             int start_idx = 0; while (start_idx < vl->len && vl->cx_to_rx[start_idx] < E->coloff) start_idx++;
-            
             int first_code = -1, last_code = -1;
-            for (int k = 0; k < vl->len; k++) {
-                if (!isspace((unsigned char)vl->chars[k])) {
-                    if (first_code == -1) first_code = k;
-                    last_code = k;
-                }
-            }
-
+            for (int k = 0; k < vl->len; k++) { if (!isspace((unsigned char)vl->chars[k])) { if (first_code == -1) first_code = k; last_code = k; } }
             int current_color = -1; int current_visual_pos = vl->cx_to_rx[start_idx];
             for (int j = start_idx; j < vl->len && current_visual_pos < E->coloff + drawlen; j++) {
                 int char_off = (int)line_start_off + j; int color = vl->hl[j];
                 if (E->last_match_off != -1 && char_off >= E->last_match_off && char_off < E->last_match_off + E->search_match_len) color = HL_MATCH;
-                
                 if (is_offset_selected(E, (size_t)char_off)) {
-                    if (E->cy != E->sel_cy) {
-                        if (first_code != -1 && j >= first_code && j <= last_code) {
-                            color = HL_SELECT;
-                        }
-                    } else {
-                        color = HL_SELECT;
-                    }
+                    if (E->cy != E->sel_cy) { if (first_code != -1 && j >= first_code && j <= last_code) color = HL_SELECT; }
+                    else color = HL_SELECT;
                 }
-
                 if (color != current_color) { const char *ansi = hl_to_ansi(color); abAppend(&ab, ansi, (int)strlen(ansi)); current_color = color; }
                 abAppend(&ab, &vl->chars[j], 1); current_visual_pos = vl->cx_to_rx[j+1];
             }
-            abAppend(&ab, "\x1b[m", 3); // FULL RESET before clearing to avoid right-side bleeding
+            abAppend(&ab, "\x1b[m", 3);
         }
         abAppend(&ab, "\x1b[K\r\n", 5);
     }
@@ -631,6 +636,7 @@ void editor_process_keypress(Editor *E) {
         case ctrl_key('q'):
             if (E->dirty) { if (!editor_confirm(E, "Unsaved changes! Quit anyway? (y/n)")) break; }
             terminal_disable_raw(&E->terminal); write(STDOUT_FILENO, "\x1b[2J\x1b[H", 7); exit(0); break;
+        case ctrl_key('w'): editor_new_file(E); break;
         case ctrl_key('s'): editor_save(E); break;
         case ctrl_key('a'): editor_save_as(E); break;
         case ctrl_key('f'): editor_find(E); break;
@@ -656,8 +662,7 @@ void editor_process_keypress(Editor *E) {
                 if (seq[1] >= '0' && seq[1] <= '9') {
                     if (read(STDIN_FILENO, &seq[2], 1) != 1) break;
                     if (seq[2] == ';') {
-                        if (read(STDIN_FILENO, &seq[3], 1) != 1) break;
-                        if (read(STDIN_FILENO, &seq[4], 1) != 1) break;
+                        if (read(STDIN_FILENO, &seq[3], 1) != 1) break; if (read(STDIN_FILENO, &seq[4], 1) != 1) break;
                         if (seq[3] == '2') { if (!E->selecting) { E->selecting = true; E->sel_cx = E->cx; E->sel_cy = E->cy; } editor_move_cursor(E, seq[4]); }
                     } else if (seq[2] == '~' && seq[1] == '3') { if (E->selecting) editor_delete_selection(E); else editor_del_char(E); }
                 } else { E->selecting = false; editor_move_cursor(E, seq[1]); }
