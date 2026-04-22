@@ -114,14 +114,12 @@ void pt_insert(PieceTable *pt, size_t offset, const char *data, size_t length) {
                 p2->next = p->next; p2->prev = p;
                 if (p->next) p->next->prev = p2;
                 p->next = p2;
-                size_t old_p_len = p->length;
                 p->length = split_point;
                 Piece *new_p = malloc(sizeof(Piece));
                 new_p->type = BUFFER_ADD; new_p->start = add_start; new_p->length = length;
                 new_p->next = p2; new_p->prev = p;
                 p->next = new_p;
                 p2->prev = new_p;
-                (void)old_p_len;
                 break;
             }
         }
@@ -143,22 +141,25 @@ void pt_delete_fixed(PieceTable *pt, size_t offset, size_t length) {
             size_t del_start_in_p = (offset > curr_off) ? offset - curr_off : 0;
             size_t del_len_in_p = p->length - del_start_in_p;
             if (del_len_in_p > to_delete) del_len_in_p = to_delete;
+
             if (del_start_in_p == 0 && del_len_in_p == p->length) {
                 Piece *to_del = p;
                 if (p->prev) p->prev->next = p->next; else pt->head = p->next;
                 if (p->next) p->next->prev = p->prev;
                 p = p->next;
                 free(to_del);
+                to_delete -= del_len_in_p;
+                // curr_off stays same as we moved to next piece
             } else if (del_start_in_p == 0) {
                 p->start += del_len_in_p;
                 p->length -= del_len_in_p;
                 to_delete -= del_len_in_p;
-                // Don't advance curr_off, p is still at the same logical position
+                // No need to advance p, the same piece still has content to consider or we finish
             } else if (del_start_in_p + del_len_in_p == p->length) {
                 p->length -= del_len_in_p;
+                to_delete -= del_len_in_p;
                 curr_off += p->length;
                 p = p->next;
-                to_delete -= del_len_in_p;
             } else {
                 Piece *p2 = malloc(sizeof(Piece));
                 p2->type = p->type;
@@ -169,9 +170,9 @@ void pt_delete_fixed(PieceTable *pt, size_t offset, size_t length) {
                 if (p->next) p->next->prev = p2;
                 p->next = p2;
                 p->length = del_start_in_p;
+                to_delete -= del_len_in_p;
                 curr_off += p->length;
                 p = p2;
-                to_delete -= del_len_in_p;
             }
         } else {
             curr_off += p->length;
@@ -183,19 +184,14 @@ void pt_delete_fixed(PieceTable *pt, size_t offset, size_t length) {
 
 bool pt_save(PieceTable *pt, const char *filename) {
     if (!pt || !filename) return false;
-    
-    // Verifica coerenza PieceTable prima di tentare il salvataggio
     size_t actual_len = 0;
     Piece *check = pt->head;
     while (check) { actual_len += check->length; check = check->next; }
     if (actual_len != pt->total_length) pt->total_length = actual_len;
-
     char tmp_name[2048];
     snprintf(tmp_name, sizeof(tmp_name), "%s.tmp", filename);
-    
     FILE *f = fopen(tmp_name, "wb");
     if (!f) return false;
-
     Piece *curr = pt->head;
     while (curr) {
         if (curr->length > 0) {
@@ -206,12 +202,10 @@ bool pt_save(PieceTable *pt, const char *filename) {
         }
         curr = curr->next;
     }
-    
     if (fflush(f) != 0 || fsync(fileno(f)) != 0) {
         fclose(f); unlink(tmp_name); return false;
     }
     fclose(f);
-
     if (rename(tmp_name, filename) != 0) {
         unlink(tmp_name); return false;
     }
