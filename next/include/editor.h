@@ -8,7 +8,8 @@
 #include "undo.h"
 #include "highlight.h"
 
-#define EDITOR_VERSION "2.10.4"
+#define EDITOR_VERSION "2.11.0"
+#define MAX_BUFFERS 32
 
 typedef struct {
     int cx, cy;      // Logical byte offset in line, logical row index
@@ -37,19 +38,34 @@ typedef struct {
     Terminal terminal;
 } Editor;
 
+typedef struct {
+    Editor *buffers[MAX_BUFFERS];
+    int count;
+    int active_idx;
+} EditorManager;
+
+// Editor Manager Functions
+void em_init(EditorManager *em);
+void em_add_buffer(EditorManager *em, const char *filename);
+void em_close_current(EditorManager *em);
+void em_next(EditorManager *em);
+void em_prev(EditorManager *em);
+Editor *em_get_active(EditorManager *em);
+
+// Standard Editor Functions (Updated to handle tabs)
 void editor_init(Editor *E);
 void editor_new_file(Editor *E);
 void editor_load(Editor *E, const char *filename);
-void editor_refresh_screen(Editor *E);
-void editor_resize(Editor *E);
-void editor_process_keypress(Editor *E);
+void editor_refresh_screen(EditorManager *em);
+void editor_resize(EditorManager *em);
+void editor_process_keypress(EditorManager *em);
 
 char *editor_prompt(Editor *E, char *prompt, void (*callback)(Editor *, char *, int));
 bool editor_confirm(Editor *E, char *prompt);
 void editor_save(Editor *E);
 void editor_save_as(Editor *E);
-void editor_find(Editor *E);
-void editor_replace(Editor *E);
+void editor_find(EditorManager *em);
+void editor_replace(EditorManager *em);
 void editor_goto_line(Editor *E);
 void editor_open_browser(Editor *E);
 void editor_undo(Editor *E);
