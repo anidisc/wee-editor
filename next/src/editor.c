@@ -493,6 +493,18 @@ void editor_del_char(Editor *E) {
     editor_sync_model(E); E->dirty = true;
 }
 
+void editor_delete_line(Editor *E) {
+    int line_count = li_get_line_count(E->li);
+    if (line_count == 0) return;
+    size_t start = li_get_offset(E->li, E->cy);
+    size_t end = (E->cy + 1 < line_count) ? li_get_offset(E->li, E->cy + 1) : E->pt->total_length;
+    char *text = pt_get_text(E->pt, start, end - start);
+    undo_push(E->undo_stack, ACTION_DELETE, start, text, end - start);
+    free(text); pt_delete_fixed(E->pt, start, end - start);
+    if (E->cy >= li_get_line_count(E->li) && E->cy > 0) E->cy--;
+    E->cx = 0; editor_sync_model(E); E->dirty = true;
+}
+
 void editor_insert_tab(Editor *E) { for (int i = 0; i < E->tab_size; i++) editor_insert_char(E, ' '); }
 
 void editor_copy(Editor *E) {
@@ -652,6 +664,7 @@ void editor_process_keypress(Editor *E) {
         case ctrl_key('f'): editor_find(E); break;
         case ctrl_key('r'): editor_replace(E); break;
         case ctrl_key('j'): editor_goto_line(E); break;
+        case ctrl_key('k'): editor_delete_line(E); break;
         case ctrl_key('o'): editor_open_browser(E); break;
         case ctrl_key('h'): editor_show_help(E); break;
         case ctrl_key('l'):

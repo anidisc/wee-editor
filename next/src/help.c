@@ -17,6 +17,7 @@ static const char *help_text[] = {
     "CTRL + o       : Open File Browser",
     "CTRL + w       : New File",
     "CTRL + j       : Go to Line",
+    "CTRL + l       : Select Line",
 
     "",
     "EDITING",
@@ -27,6 +28,7 @@ static const char *help_text[] = {
     "CTRL + c       : Copy selected text",
     "CTRL + x       : Cut selected text",
     "CTRL + v       : Paste from clipboard",
+    "CTRL + k       : Delete Line",
     "CTRL + n       : Toggle Line Numbers",
     "TAB            : Insert 4 spaces",
     "BACKSPACE      : Delete left",
