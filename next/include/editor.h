@@ -8,7 +8,7 @@
 #include "undo.h"
 #include "highlight.h"
 
-#define EDITOR_VERSION "2.11.1"
+#define EDITOR_VERSION "2.12.0"
 #define MAX_BUFFERS 32
 
 typedef struct {
@@ -66,8 +66,10 @@ bool editor_confirm(Editor *E, char *prompt);
 void editor_save(Editor *E);
 void editor_save_as(Editor *E);
 void editor_find(EditorManager *em);
+void editor_find_next(Editor *E, const char *query, int dir);
 void editor_replace(EditorManager *em);
 void editor_goto_line(Editor *E);
+void editor_fuzzy_finder(EditorManager *em);
 void editor_open_browser(Editor *E);
 void editor_undo(Editor *E);
 void editor_redo(Editor *E);

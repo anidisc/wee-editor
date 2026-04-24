@@ -12,9 +12,174 @@
 #include <string.h>
 #include <fcntl.h>
 #include <libgen.h>
+#include <dirent.h>
+#include <sys/stat.h>
 
 #define ctrl_key(k) ((k) & 0x1f)
 #define SWAP_THRESHOLD 20
+#define MAX_FUZZY_FILES 1024
+
+/* --- FUZZY FINDER LOGIC --- */
+
+typedef struct {
+    char *path;
+    int score;
+} FuzzyMatch;
+
+static void scan_files_recursive(const char *path, char **file_list, int *count, int max) {
+    if (*count >= max) return;
+    DIR *d = opendir(path);
+    if (!d) return;
+    struct dirent *entry;
+    while ((entry = readdir(d)) != NULL) {
+        if (entry->d_name[0] == '.') {
+            if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) continue;
+            if (strcmp(entry->d_name, ".git") == 0) continue;
+        }
+        char full_path[1024];
+        snprintf(full_path, sizeof(full_path), "%s/%s", path, entry->d_name);
+        struct stat st;
+        if (stat(full_path, &st) == 0) {
+            if (S_ISDIR(st.st_mode)) {
+                if (strcmp(entry->d_name, "obj") != 0 && strcmp(entry->d_name, "node_modules") != 0 && strcmp(entry->d_name, ".git") != 0) {
+                    scan_files_recursive(full_path, file_list, count, max);
+                }
+            } else if (S_ISREG(st.st_mode)) {
+                const char *p = (strncmp(full_path, "./", 2) == 0) ? full_path + 2 : full_path;
+                file_list[*count] = strdup(p);
+                (*count)++;
+                if (*count >= max) break;
+            }
+        }
+    }
+    closedir(d);
+}
+
+static int fuzzy_score(const char *pattern, const char *text) {
+    if (!pattern || !*pattern) return 0;
+    int score = 0;
+    const char *p = pattern;
+    const char *t = text;
+    const char *first_match = NULL;
+    
+    while (*p && *t) {
+        if (tolower(*p) == tolower(*t)) {
+            if (!first_match) first_match = t;
+            score += 10;
+            if (*p == *t) score += 5;
+            p++;
+        }
+        t++;
+    }
+    if (*p) return -1;
+    if (first_match) {
+        score -= (int)(t - first_match);
+        const char *filename = strrchr(text, '/');
+        filename = filename ? filename + 1 : text;
+        if (tolower(pattern[0]) == tolower(filename[0])) score += 50;
+    }
+    return score;
+}
+
+void editor_fuzzy_finder(EditorManager *em) {
+    Editor *E = em_get_active(em);
+    if (!E) return;
+
+    char *file_list[MAX_FUZZY_FILES];
+    int file_count = 0;
+    scan_files_recursive(".", file_list, &file_count, MAX_FUZZY_FILES);
+
+    char query[128] = "";
+    int qlen = 0;
+    int selection = 0;
+    FuzzyMatch matches[MAX_FUZZY_FILES];
+    int match_count = 0;
+
+    while (1) {
+        match_count = 0;
+        for (int i = 0; i < file_count; i++) {
+            int score = fuzzy_score(query, file_list[i]);
+            if (score >= 0) {
+                matches[match_count].path = file_list[i];
+                matches[match_count].score = score;
+                match_count++;
+            }
+        }
+        for (int i = 0; i < match_count - 1; i++) {
+            for (int j = 0; j < match_count - i - 1; j++) {
+                if (matches[j].score < matches[j+1].score) {
+                    FuzzyMatch tmp = matches[j];
+                    matches[j] = matches[j+1];
+                    matches[j+1] = tmp;
+                }
+            }
+        }
+
+        if (selection >= match_count) selection = match_count > 0 ? match_count - 1 : 0;
+        if (selection < 0) selection = 0;
+
+        struct abuf ab = ABUF_INIT;
+        abAppend(&ab, "\x1b[?25l", 6);
+        
+        // Render Header on row 2
+        char header[256];
+        int hlen = snprintf(header, sizeof(header), "\x1b[2;1H\x1b[1;33m FIND FILE \x1b[m> ");
+        abAppend(&ab, header, hlen);
+        abAppend(&ab, query, qlen);
+        abAppend(&ab, "\x1b[K", 3);
+
+        int rows_to_show = 10;
+        if (rows_to_show > E->terminal.screenrows - 2) rows_to_show = E->terminal.screenrows - 2;
+        
+        for (int i = 0; i < rows_to_show; i++) {
+            char move[32]; snprintf(move, sizeof(move), "\x1b[%d;1H", i + 3);
+            abAppend(&ab, move, (int)strlen(move));
+            if (i < match_count) {
+                if (i == selection) abAppend(&ab, "\x1b[7m > ", 7);
+                else abAppend(&ab, "   ", 3);
+                int path_len = (int)strlen(matches[i].path);
+                if (path_len > E->terminal.screencols - 5) path_len = E->terminal.screencols - 5;
+                abAppend(&ab, matches[i].path, path_len);
+                abAppend(&ab, "\x1b[m\x1b[K", 6);
+            } else {
+                abAppend(&ab, "\x1b[K", 3);
+            }
+        }
+        
+        // Correct cursor positioning: " FIND FILE > " is 13 characters
+        char move_cursor[32];
+        snprintf(move_cursor, sizeof(move_cursor), "\x1b[2;%dH", 14 + qlen);
+        abAppend(&ab, move_cursor, (int)strlen(move_cursor));
+        abAppend(&ab, "\x1b[?25h", 6);
+
+        write(STDOUT_FILENO, ab.b, ab.len); abFree(&ab);
+
+        char c;
+        if (read(STDIN_FILENO, &c, 1) <= 0) continue;
+        if (c == '\r') {
+            if (match_count > 0) {
+                em_add_buffer(em, matches[selection].path);
+                break;
+            }
+        } else if (c == '\x1b') {
+            char seq[3];
+            if (read(STDIN_FILENO, &seq[0], 1) == 1 && seq[0] == '[') {
+                if (read(STDIN_FILENO, &seq[1], 1) == 1) {
+                    if (seq[1] == 'A') selection--;
+                    if (seq[1] == 'B') selection++;
+                }
+            } else break;
+        } else if (c == 127) {
+            if (qlen > 0) query[--qlen] = '\0';
+        } else if (!iscntrl(c) && qlen < (int)sizeof(query) - 1) {
+            query[qlen++] = c;
+            query[qlen] = '\0';
+        }
+    }
+
+    for (int i = 0; i < file_count; i++) free(file_list[i]);
+    editor_refresh_screen(em);
+}
 
 /* --- SWAP FILE HELPERS --- */
 
@@ -474,12 +639,18 @@ void editor_refresh_screen(EditorManager *em) {
     if (E->show_line_numbers) { int total_lines = li_get_line_count(E->li); ln_width = snprintf(NULL, 0, "%d", total_lines) + 1; }
     for (int i = 0; i < E->terminal.screenrows; i++) {
         char move_to_row[32]; snprintf(move_to_row, sizeof(move_to_row), "\x1b[%d;1H", i + 2);
-        abAppend(&ab, move_to_row, strlen(move_to_row));
+        abAppend(&ab, move_to_row, (int)strlen(move_to_row));
         int filerow = i + E->rowoff; abAppend(&ab, "\x1b[m", 3);
         if (E->show_line_numbers) {
             char ln_buf[32];
-            if (filerow < li_get_line_count(E->li)) { const char *color = (filerow == E->cy) ? "\x1b[37m" : "\x1b[90m"; int n = snprintf(ln_buf, sizeof(ln_buf), "%s%*d \x1b[m", color, ln_width, filerow + 1); abAppend(&ab, ln_buf, n); }
-            else { int n = snprintf(ln_buf, sizeof(ln_buf), "\x1b[90m%*s \x1b[m", ln_width, "~"); abAppend(&ab, ln_buf, n); }
+            if (filerow < li_get_line_count(E->li)) {
+                const char *color = (filerow == E->cy) ? "\x1b[37m" : "\x1b[90m";
+                int n = snprintf(ln_buf, sizeof(ln_buf), "%s%*d \x1b[m", color, ln_width, filerow + 1);
+                abAppend(&ab, ln_buf, n);
+            } else {
+                int n = snprintf(ln_buf, sizeof(ln_buf), "\x1b[90m%*s \x1b[m", ln_width, "~");
+                abAppend(&ab, ln_buf, n);
+            }
         }
         ViewLine *vl = &E->vp->lines[i];
         size_t line_start_off = li_get_offset(E->li, filerow);
@@ -506,7 +677,7 @@ void editor_refresh_screen(EditorManager *em) {
     }
     
     char move_to_status[32]; snprintf(move_to_status, sizeof(move_to_status), "\x1b[%d;1H", E->terminal.screenrows + 2);
-    abAppend(&ab, move_to_status, strlen(move_to_status));
+    abAppend(&ab, move_to_status, (int)strlen(move_to_status));
     abAppend(&ab, "\x1b[7m", 4);
     char status[128], rstatus[64];
     const char *display_name = E->filename ? strrchr(E->filename, '/') : NULL;
@@ -726,7 +897,10 @@ void editor_process_keypress(EditorManager *em) {
     switch (c) {
         case '\r': editor_insert_newline(E); break;
         case '\t': if (E->selecting) editor_indent_selection(E, 1); else editor_insert_tab(E); break;
+        case 'n': if (E->last_search) editor_find_next(E, E->last_search, 1); else editor_insert_char(E, c); break;
+        case 'N': if (E->last_search) editor_find_next(E, E->last_search, -1); else editor_insert_char(E, c); break;
         case ctrl_key('q'): em_close_current(em); break;
+        case ctrl_key('p'): editor_fuzzy_finder(em); break;
         case ctrl_key('w'): em_add_buffer(em, NULL); break;
         case ctrl_key('s'): editor_save(E); break;
         case ctrl_key('a'): editor_save_as(E); break;
@@ -744,7 +918,6 @@ void editor_process_keypress(EditorManager *em) {
             if (E->cy < li_get_line_count(E->li) - 1) { E->cy++; E->cx = 0; } else E->cx = (int)get_line_len(E, E->cy);
             break;
         case ctrl_key('g'): if (E->last_search) editor_find_next(E, E->last_search, 1); break;
-        case ctrl_key('p'): if (E->last_search) editor_find_next(E, E->last_search, -1); break;
         case ctrl_key('z'): editor_undo(E); break;
         case ctrl_key('y'): editor_redo(E); break;
         case ctrl_key('c'): editor_copy(E); E->selecting = false; break;
