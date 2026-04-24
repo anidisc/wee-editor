@@ -149,12 +149,10 @@ void pt_delete_fixed(PieceTable *pt, size_t offset, size_t length) {
                 p = p->next;
                 free(to_del);
                 to_delete -= del_len_in_p;
-                // curr_off stays same as we moved to next piece
             } else if (del_start_in_p == 0) {
                 p->start += del_len_in_p;
                 p->length -= del_len_in_p;
                 to_delete -= del_len_in_p;
-                // No need to advance p, the same piece still has content to consider or we finish
             } else if (del_start_in_p + del_len_in_p == p->length) {
                 p->length -= del_len_in_p;
                 to_delete -= del_len_in_p;
@@ -184,28 +182,60 @@ void pt_delete_fixed(PieceTable *pt, size_t offset, size_t length) {
 
 bool pt_save(PieceTable *pt, const char *filename) {
     if (!pt || !filename) return false;
+    
+    // Default save (internal LF format)
+    return pt_save_ext(pt, filename, false);
+}
+
+bool pt_save_ext(PieceTable *pt, const char *filename, bool force_crlf) {
+    if (!pt || !filename) return false;
+    
     size_t actual_len = 0;
     Piece *check = pt->head;
     while (check) { actual_len += check->length; check = check->next; }
     if (actual_len != pt->total_length) pt->total_length = actual_len;
+
     char tmp_name[2048];
     snprintf(tmp_name, sizeof(tmp_name), "%s.tmp", filename);
+    
     FILE *f = fopen(tmp_name, "wb");
     if (!f) return false;
+
     Piece *curr = pt->head;
     while (curr) {
         if (curr->length > 0) {
             const char *src = (curr->type == BUFFER_ORIGINAL) ? pt->original.data : pt->add.data;
-            if (!src || fwrite(src + curr->start, 1, curr->length, f) != curr->length) {
-                fclose(f); unlink(tmp_name); return false;
+            if (!src) { fclose(f); unlink(tmp_name); return false; }
+
+            if (force_crlf) {
+                // Expand \n to \r\n
+                for (size_t i = 0; i < curr->length; i++) {
+                    char c = src[curr->start + i];
+                    if (c == '\n') {
+                        // Check if it's already part of a CRLF
+                        bool already_crlf = false;
+                        if (i > 0 && src[curr->start + i - 1] == '\r') already_crlf = true;
+                        
+                        if (!already_crlf) {
+                            if (fputc('\r', f) == EOF) { fclose(f); unlink(tmp_name); return false; }
+                        }
+                    }
+                    if (fputc(c, f) == EOF) { fclose(f); unlink(tmp_name); return false; }
+                }
+            } else {
+                if (fwrite(src + curr->start, 1, curr->length, f) != curr->length) {
+                    fclose(f); unlink(tmp_name); return false;
+                }
             }
         }
         curr = curr->next;
     }
+    
     if (fflush(f) != 0 || fsync(fileno(f)) != 0) {
         fclose(f); unlink(tmp_name); return false;
     }
     fclose(f);
+
     if (rename(tmp_name, filename) != 0) {
         unlink(tmp_name); return false;
     }

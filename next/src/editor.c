@@ -5,6 +5,7 @@
 #include "highlight.h"
 #include "file_browser.h"
 #include "help.h"
+#include "utf8.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
@@ -360,6 +361,8 @@ void editor_init(Editor *E) {
     E->tab_size = 4;
     E->dirty = false;
     E->dirty_count = 0;
+    E->line_ending = END_LF;
+    E->encoding = ENC_UTF8;
     E->syntax = NULL;
     E->pt = pt_create("", 0);
     E->li = li_create();
@@ -420,15 +423,31 @@ void editor_load(Editor *E, const char *filename) {
         }
     }
     free(swap_name);
-    if (recovered) return;
 
-    if (E->filename) free(E->filename);
-    E->filename = strdup(filename);
-    E->syntax = hl_get_syntax(filename);
-    if (E->pt) pt_destroy(E->pt);
-    E->pt = pt_open(filename);
-    editor_sync_model(E);
-    E->dirty = false; E->dirty_count = 0;
+    if (!recovered) {
+        if (E->filename) free(E->filename);
+        E->filename = strdup(filename);
+        E->syntax = hl_get_syntax(filename);
+        if (E->pt) pt_destroy(E->pt);
+        E->pt = pt_open(filename);
+        editor_sync_model(E);
+        E->dirty = false; E->dirty_count = 0;
+    }
+
+    // Detect Encoding and Line Endings
+    char *text = pt_get_text(E->pt, 0, E->pt->total_length);
+    if (text) {
+        if (!utf8_is_valid(text, E->pt->total_length)) E->encoding = END_LATIN1;
+        else E->encoding = ENC_UTF8;
+
+        int crlf_count = 0;
+        for (size_t i = 0; i < E->pt->total_length; i++) {
+            if (text[i] == '\r' && i + 1 < E->pt->total_length && text[i+1] == '\n') crlf_count++;
+        }
+        if (crlf_count > 0) E->line_ending = END_CRLF;
+        else E->line_ending = END_LF;
+        free(text);
+    }
 }
 
 char *editor_prompt(Editor *E, char *prompt, void (*callback)(Editor *, char *, int)) {
@@ -465,14 +484,14 @@ void editor_save_as(Editor *E) {
         if (E->filename) free(E->filename);
         E->filename = strdup(new_name);
         E->syntax = hl_get_syntax(new_name);
-        if (pt_save(E->pt, E->filename)) { E->dirty = false; E->dirty_count = 0; }
+        if (pt_save_ext(E->pt, E->filename, E->line_ending == END_CRLF)) { E->dirty = false; E->dirty_count = 0; }
         free(new_name);
     }
 }
 
 void editor_save(Editor *E) {
     if (E->filename == NULL) { editor_save_as(E); return; }
-    if (pt_save(E->pt, E->filename)) {
+    if (pt_save_ext(E->pt, E->filename, E->line_ending == END_CRLF)) {
         E->dirty = false; E->dirty_count = 0;
         editor_remove_swap(E);
     }
@@ -624,7 +643,6 @@ void editor_refresh_screen(EditorManager *em) {
         if (vl->chars) hl_apply(vl->chars, vl->len, vl->hl, E->syntax);
     }
 
-    // Find visual cursor position
     int v_row = -1;
     for (int i = 0; i < E->terminal.screenrows; i++) {
         if (E->vp->lines[i].chars && E->vp->lines[i].logical_row == E->cy) {
@@ -696,8 +714,10 @@ void editor_refresh_screen(EditorManager *em) {
     const char *display_name = E->filename ? strrchr(E->filename, '/') : NULL;
     display_name = display_name ? display_name + 1 : (E->filename ? E->filename : "[No Name]");
     const char *ftype = E->syntax ? E->syntax->filetype : "no ft";
-    int len = snprintf(status, sizeof(status), " %s - %d lines (%s) %s %s", display_name, total_lines, ftype, E->dirty ? "(modified)" : "", E->wrap_enabled ? "[W]" : "");
-    int rstatus_len = snprintf(rstatus, sizeof(rstatus), "LN: %s %d:%d ", E->show_line_numbers ? "ON" : "OFF", E->cy + 1, E->rx + 1);
+    const char *le = (E->line_ending == END_CRLF) ? "CRLF" : "LF";
+    const char *enc = (E->encoding == ENC_UTF8) ? "UTF-8" : "LATIN1";
+    int len = snprintf(status, sizeof(status), " %s - %d lines (%s) %s %s [%s %s]", display_name, total_lines, ftype, E->dirty ? "(modified)" : "", E->wrap_enabled ? "[W]" : "", enc, le);
+    int rstatus_len = snprintf(rstatus, sizeof(rstatus), "LN: %s %d:%d ", E->show_line_numbers ? "ON" : "OFF", E->cy + 1, E->cx + 1);
     if (len > E->terminal.screencols - 1) len = E->terminal.screencols - 1;
     abAppend(&ab, status, len);
     while (len < E->terminal.screencols - 1) { if (E->terminal.screencols - 1 - len == rstatus_len) { abAppend(&ab, rstatus, rstatus_len); break; } else { abAppend(&ab, " ", 1); len++; } }

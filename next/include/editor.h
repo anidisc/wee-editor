@@ -8,8 +8,18 @@
 #include "undo.h"
 #include "highlight.h"
 
-#define EDITOR_VERSION "2.13.0"
+#define EDITOR_VERSION "2.14.0"
 #define MAX_BUFFERS 32
+
+typedef enum {
+    END_LF,     // Unix/macOS (\n)
+    END_CRLF    // Windows (\r\n)
+} LineEnding;
+
+typedef enum {
+    ENC_UTF8,
+    END_LATIN1
+} Encoding;
 
 typedef struct {
     int cx, cy;      // Logical byte offset in line, logical row index
@@ -30,8 +40,11 @@ typedef struct {
     bool wrap_enabled;
     int tab_size;
     bool dirty;
-    int dirty_count; // Number of changes since last swap update
+    int dirty_count; 
     
+    LineEnding line_ending;
+    Encoding encoding;
+
     EditorSyntax *syntax;
     PieceTable *pt;
     LineIndex *li;
@@ -54,7 +67,7 @@ void em_next(EditorManager *em);
 void em_prev(EditorManager *em);
 Editor *em_get_active(EditorManager *em);
 
-// Standard Editor Functions (Updated to handle tabs)
+// Standard Editor Functions
 void editor_init(Editor *E);
 void editor_new_file(Editor *E);
 void editor_load(Editor *E, const char *filename);
