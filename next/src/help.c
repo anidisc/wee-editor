@@ -14,8 +14,10 @@ static const char *help_text[] = {
     "Arrows         : Move cursor",
     "Shift + Arrows : Select text",
     "n / N          : Find next / previous (after search)",
+    "ALT + Left/Right: Switch between open buffers (Tabs)",
+    "CTRL + p       : Fuzzy File Finder (Quick open)",
     "CTRL + o       : Open File Browser",
-    "CTRL + w       : New File",
+    "CTRL + w       : New Empty Buffer",
     "CTRL + j       : Go to Line",
     "CTRL + l       : Select Line",
 
@@ -25,24 +27,23 @@ static const char *help_text[] = {
     "CTRL + s       : Save",
     "CTRL + a       : Save As",
     "CTRL + z / y   : Undo / Redo",
-    "CTRL + c       : Copy selected text",
-    "CTRL + x       : Cut selected text",
-    "CTRL + v       : Paste from clipboard",
+    "CTRL + c / x   : Copy / Cut",
+    "CTRL + v       : Paste",
     "CTRL + k       : Delete Line",
+    "ALT  + w       : Toggle Line Wrapping (Soft Wrap)",
     "CTRL + n       : Toggle Line Numbers",
-    "TAB            : Insert 4 spaces",
-    "BACKSPACE      : Delete left",
-    "DEL            : Delete right",
+    "TAB / BACKSPACE: Indent / De-indent selection (if selected)",
     "",
     "SEARCH & REPLACE",
     "----------------",
-    "CTRL + f       : Find (Enter to search, Arrows to navigate, ESC to exit)",
-    "CTRL + r       : Replace (Case Sensitive, interactive)",
+    "CTRL + f       : Find (interactive)",
+    "CTRL + r       : Replace (interactive)",
+    "n / N          : Next / Previous match",
     "",
     "SYSTEM",
     "------",
     "F1 / CTRL + h  : Show this help",
-    "CTRL + q       : Quit (with confirmation if modified)",
+    "CTRL + q       : Close Buffer (Quit if last)",
     "",
     "Press any key to return to editor..."
 };
@@ -56,13 +57,13 @@ void editor_show_help(Editor *E) {
     abAppend(&ab, "\x1b[H", 3);
 
     abAppend(&ab, "  ", 2);
-    abAppend(&ab, header_with_ver, strlen(header_with_ver));
+    abAppend(&ab, header_with_ver, (int)strlen(header_with_ver));
     abAppend(&ab, "\x1b[K\r\n", 5);
 
     int rows = sizeof(help_text) / sizeof(help_text[0]);
-    for (int i = 1; i < E->terminal.screenrows; i++) {
+    for (int i = 1; i < E->terminal.screenrows + 1; i++) {
         if (i < rows) {
-            int len = strlen(help_text[i]);
+            int len = (int)strlen(help_text[i]);
             if (len > E->terminal.screencols) len = E->terminal.screencols;
             abAppend(&ab, "  ", 2);
             abAppend(&ab, help_text[i], len);
@@ -73,7 +74,6 @@ void editor_show_help(Editor *E) {
     write(STDOUT_FILENO, ab.b, ab.len);
     abFree(&ab);
 
-    // Wait for any key
     char c;
     while (read(STDIN_FILENO, &c, 1) == 0);
 }

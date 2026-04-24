@@ -4,6 +4,7 @@
 #include <stdbool.h>
 #include <stdlib.h>
 #include <unistd.h>
+#include <string.h>
 
 volatile sig_atomic_t resize_pending = false;
 
@@ -29,8 +30,9 @@ int main(int argc, char **argv) {
     Editor *active = em_get_active(&EM);
     if (!active) exit(1);
     
-    // Salva lo stato del terminale all'inizio
+    // Salva lo stato del terminale all'inizio usando una struttura pulita
     Terminal main_term;
+    memset(&main_term, 0, sizeof(Terminal));
     terminal_enable_raw(&main_term);
     signal(SIGWINCH, handle_sigwinch);
 

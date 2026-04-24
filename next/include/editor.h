@@ -8,7 +8,7 @@
 #include "undo.h"
 #include "highlight.h"
 
-#define EDITOR_VERSION "2.12.0"
+#define EDITOR_VERSION "2.13.0"
 #define MAX_BUFFERS 32
 
 typedef struct {
@@ -27,6 +27,7 @@ typedef struct {
     char *clipboard;
 
     bool show_line_numbers;
+    bool wrap_enabled;
     int tab_size;
     bool dirty;
     int dirty_count; // Number of changes since last swap update

@@ -121,7 +121,6 @@ void editor_fuzzy_finder(EditorManager *em) {
         struct abuf ab = ABUF_INIT;
         abAppend(&ab, "\x1b[?25l", 6);
         
-        // Render Header on row 2
         char header[256];
         int hlen = snprintf(header, sizeof(header), "\x1b[2;1H\x1b[1;33m FIND FILE \x1b[m> ");
         abAppend(&ab, header, hlen);
@@ -146,7 +145,6 @@ void editor_fuzzy_finder(EditorManager *em) {
             }
         }
         
-        // Correct cursor positioning: " FIND FILE > " is 13 characters
         char move_cursor[32];
         snprintf(move_cursor, sizeof(move_cursor), "\x1b[2;%dH", 14 + qlen);
         abAppend(&ab, move_cursor, (int)strlen(move_cursor));
@@ -358,6 +356,7 @@ void editor_init(Editor *E) {
     E->selecting = false;
     E->clipboard = NULL;
     E->show_line_numbers = true;
+    E->wrap_enabled = false;
     E->tab_size = 4;
     E->dirty = false;
     E->dirty_count = 0;
@@ -612,16 +611,34 @@ void editor_resize(EditorManager *em) {
 
 void editor_refresh_screen(EditorManager *em) {
     Editor *E = em_get_active(em); if (!E) return;
-    editor_scroll(E); vp_sync(E->vp, E->pt, E->li, E->rowoff);
-    for (int i = 0; i < E->terminal.screenrows; i++) {
-        ViewLine *vl = &E->vp->lines[i]; hl_apply(vl->chars, vl->len, vl->hl, E->syntax);
-    }
-    int v_idx = E->cy - E->rowoff;
-    if (v_idx >= 0 && v_idx < E->terminal.screenrows) {
-        ViewLine *vl = &E->vp->lines[v_idx];
-        if (E->cx > vl->len) E->cx = vl->len; E->rx = (vl->len > 0) ? vl->cx_to_rx[E->cx] : 0;
-    } else E->rx = 0;
+
+    int total_lines = li_get_line_count(E->li);
+    int ln_width = E->show_line_numbers ? snprintf(NULL, 0, "%d", total_lines) + 1 : 0;
+    int wrap_width = E->wrap_enabled ? (E->terminal.screencols - ln_width - 1) : -1;
+
+    editor_scroll(E); 
+    vp_sync(E->vp, E->pt, E->li, E->rowoff, wrap_width);
     
+    for (int i = 0; i < E->terminal.screenrows; i++) {
+        ViewLine *vl = &E->vp->lines[i]; 
+        if (vl->chars) hl_apply(vl->chars, vl->len, vl->hl, E->syntax);
+    }
+
+    // Find visual cursor position
+    int v_row = -1;
+    for (int i = 0; i < E->terminal.screenrows; i++) {
+        if (E->vp->lines[i].chars && E->vp->lines[i].logical_row == E->cy) {
+            int start_byte = E->vp->lines[i].byte_offset;
+            int end_byte = start_byte + E->vp->lines[i].len;
+            if (E->cx >= start_byte && (E->cx < end_byte || (E->cx == end_byte && (i + 1 == E->terminal.screenrows || E->vp->lines[i+1].logical_row != E->cy)))) {
+                v_row = i;
+                E->rx = E->vp->lines[i].cx_to_rx[E->cx - start_byte];
+                break;
+            }
+        }
+    }
+    if (v_row == -1) E->rx = 0;
+
     struct abuf ab = ABUF_INIT;
     abAppend(&ab, "\x1b[?25l", 6); abAppend(&ab, "\x1b[H", 3);
     
@@ -635,41 +652,37 @@ void editor_refresh_screen(EditorManager *em) {
     }
     abAppend(&ab, "\x1b[m\x1b[K", 6);
 
-    int ln_width = 0;
-    if (E->show_line_numbers) { int total_lines = li_get_line_count(E->li); ln_width = snprintf(NULL, 0, "%d", total_lines) + 1; }
     for (int i = 0; i < E->terminal.screenrows; i++) {
         char move_to_row[32]; snprintf(move_to_row, sizeof(move_to_row), "\x1b[%d;1H", i + 2);
         abAppend(&ab, move_to_row, (int)strlen(move_to_row));
-        int filerow = i + E->rowoff; abAppend(&ab, "\x1b[m", 3);
+        
+        ViewLine *vl = &E->vp->lines[i];
+        abAppend(&ab, "\x1b[m", 3);
         if (E->show_line_numbers) {
             char ln_buf[32];
-            if (filerow < li_get_line_count(E->li)) {
-                const char *color = (filerow == E->cy) ? "\x1b[37m" : "\x1b[90m";
-                int n = snprintf(ln_buf, sizeof(ln_buf), "%s%*d \x1b[m", color, ln_width, filerow + 1);
+            if (vl->chars && !vl->is_wrapped) {
+                const char *color = (vl->logical_row == E->cy) ? "\x1b[37m" : "\x1b[90m";
+                int n = snprintf(ln_buf, sizeof(ln_buf), "%s%*d \x1b[m", color, ln_width, vl->logical_row + 1);
+                abAppend(&ab, ln_buf, n);
+            } else if (vl->chars) {
+                int n = snprintf(ln_buf, sizeof(ln_buf), "\x1b[90m%*s \x1b[m", ln_width, " ");
                 abAppend(&ab, ln_buf, n);
             } else {
                 int n = snprintf(ln_buf, sizeof(ln_buf), "\x1b[90m%*s \x1b[m", ln_width, "~");
                 abAppend(&ab, ln_buf, n);
             }
         }
-        ViewLine *vl = &E->vp->lines[i];
-        size_t line_start_off = li_get_offset(E->li, filerow);
-        if (vl->visual_len > E->coloff) {
-            int drawlen = vl->visual_len - E->coloff; int effective_cols = E->terminal.screencols - (E->show_line_numbers ? ln_width + 1 : 0);
+
+        if (vl->chars && vl->visual_len > E->coloff) {
+            int drawlen = vl->visual_len - E->coloff; int effective_cols = E->terminal.screencols - ln_width - 1;
             if (drawlen > effective_cols) drawlen = effective_cols;
             int start_idx = 0; while (start_idx < vl->len && vl->cx_to_rx[start_idx] < E->coloff) start_idx++;
-            int first_code = -1, last_code = -1;
-            for (int k = 0; k < vl->len; k++) { if (!isspace((unsigned char)vl->chars[k])) { if (first_code == -1) first_code = k; last_code = k; } }
-            int current_color = -1; int current_visual_pos = vl->cx_to_rx[start_idx];
-            for (int j = start_idx; j < vl->len && current_visual_pos < E->coloff + drawlen; j++) {
-                int char_off = (int)line_start_off + j; int color = vl->hl[j];
-                if (E->last_match_off != -1 && char_off >= E->last_match_off && char_off < E->last_match_off + E->search_match_len) color = HL_MATCH;
-                if (is_offset_selected(E, (size_t)char_off)) {
-                    if (E->cy != E->sel_cy) { if (first_code != -1 && j >= first_code && j <= last_code) color = HL_SELECT; }
-                    else color = HL_SELECT;
-                }
+            int current_color = -1;
+            for (int j = start_idx; j < vl->len && vl->cx_to_rx[j] < E->coloff + drawlen; j++) {
+                int color = vl->hl[j];
+                if (is_offset_selected(E, (size_t)li_get_offset(E->li, vl->logical_row) + vl->byte_offset + j)) color = HL_SELECT;
                 if (color != current_color) { const char *ansi = hl_to_ansi(color); abAppend(&ab, ansi, (int)strlen(ansi)); current_color = color; }
-                abAppend(&ab, &vl->chars[j], 1); current_visual_pos = vl->cx_to_rx[j+1];
+                abAppend(&ab, &vl->chars[j], 1);
             }
             abAppend(&ab, "\x1b[m", 3);
         }
@@ -683,28 +696,63 @@ void editor_refresh_screen(EditorManager *em) {
     const char *display_name = E->filename ? strrchr(E->filename, '/') : NULL;
     display_name = display_name ? display_name + 1 : (E->filename ? E->filename : "[No Name]");
     const char *ftype = E->syntax ? E->syntax->filetype : "no ft";
-    int len = snprintf(status, sizeof(status), " %s - %d lines (%s) %s", display_name, li_get_line_count(E->li), ftype, E->dirty ? "(modified)" : "");
+    int len = snprintf(status, sizeof(status), " %s - %d lines (%s) %s %s", display_name, total_lines, ftype, E->dirty ? "(modified)" : "", E->wrap_enabled ? "[W]" : "");
     int rstatus_len = snprintf(rstatus, sizeof(rstatus), "LN: %s %d:%d ", E->show_line_numbers ? "ON" : "OFF", E->cy + 1, E->rx + 1);
     if (len > E->terminal.screencols - 1) len = E->terminal.screencols - 1;
     abAppend(&ab, status, len);
     while (len < E->terminal.screencols - 1) { if (E->terminal.screencols - 1 - len == rstatus_len) { abAppend(&ab, rstatus, rstatus_len); break; } else { abAppend(&ab, " ", 1); len++; } }
     abAppend(&ab, "\x1b[m", 3);
     
-    char buf[32]; int cursor_x = (E->rx - E->coloff) + 1 + (E->show_line_numbers ? ln_width + 1 : 0);
-    int n = snprintf(buf, sizeof(buf), "\x1b[%d;%dH", (E->cy - E->rowoff) + 2, cursor_x);
+    char buf[32];
+    int cursor_y = (v_row != -1) ? v_row + 2 : (E->cy - E->rowoff + 2);
+    int cursor_x = (E->rx - E->coloff) + 1 + ln_width + (E->show_line_numbers ? 1 : 0);
+    int n = snprintf(buf, sizeof(buf), "\x1b[%d;%dH", cursor_y, cursor_x);
     abAppend(&ab, buf, n); abAppend(&ab, "\x1b[?25h", 6);
     write(STDOUT_FILENO, ab.b, ab.len); abFree(&ab);
 }
 
 void editor_move_cursor(Editor *E, int key) {
     int line_count = li_get_line_count(E->li);
-    int v_idx = E->cy - E->rowoff;
-    int current_line_len = (E->cy < line_count && v_idx >= 0 && v_idx < E->terminal.screenrows) ? E->vp->lines[v_idx].len : 0;
+    int v_idx = -1;
+    for (int i = 0; i < E->terminal.screenrows; i++) {
+        if (E->vp->lines[i].chars && E->vp->lines[i].logical_row == E->cy) {
+            int start = E->vp->lines[i].byte_offset;
+            int end = start + E->vp->lines[i].len;
+            if (E->cx >= start && E->cx <= end) { v_idx = i; break; }
+        }
+    }
+
     switch (key) {
-        case 'A': if (E->cy > 0) E->cy--; break;
-        case 'B': if (E->cy < line_count - 1) E->cy++; break;
-        case 'D': if (E->cx > 0) E->cx--; else if (E->cy > 0) { E->cy--; editor_sync_model(E); vp_sync(E->vp, E->pt, E->li, E->rowoff); int idx = E->cy - E->rowoff; if (idx >= 0) E->cx = E->vp->lines[idx].len; } break;
-        case 'C': if (E->cx < current_line_len) E->cx++; else if (E->cy < line_count - 1) { E->cy++; E->cx = 0; } break;
+        case 'A': // Up
+            if (E->wrap_enabled && v_idx > 0 && E->vp->lines[v_idx-1].logical_row == E->cy) {
+                int rel_off = E->cx - E->vp->lines[v_idx].byte_offset;
+                int prev_len = E->vp->lines[v_idx-1].len;
+                E->cx = E->vp->lines[v_idx-1].byte_offset + (rel_off < prev_len ? rel_off : prev_len);
+            } else if (E->cy > 0) {
+                E->cy--;
+                int len = (int)get_line_len(E, E->cy);
+                if (E->cx > len) E->cx = len;
+            }
+            break;
+        case 'B': // Down
+            if (E->wrap_enabled && v_idx != -1 && v_idx < E->terminal.screenrows - 1 && E->vp->lines[v_idx+1].logical_row == E->cy && E->vp->lines[v_idx+1].chars) {
+                int rel_off = E->cx - E->vp->lines[v_idx].byte_offset;
+                int next_len = E->vp->lines[v_idx+1].len;
+                E->cx = E->vp->lines[v_idx+1].byte_offset + (rel_off < next_len ? rel_off : next_len);
+            } else if (E->cy < line_count - 1) {
+                E->cy++;
+                int len = (int)get_line_len(E, E->cy);
+                if (E->cx > len) E->cx = len;
+            }
+            break;
+        case 'D': // Left
+            if (E->cx > 0) E->cx--;
+            else if (E->cy > 0) { E->cy--; E->cx = (int)get_line_len(E, E->cy); }
+            break;
+        case 'C': // Right
+            if (E->cx < (int)get_line_len(E, E->cy)) E->cx++;
+            else if (E->cy < line_count - 1) { E->cy++; E->cx = 0; }
+            break;
     }
 }
 
@@ -756,13 +804,13 @@ void editor_delete_char(Editor *E) {
     char *deleted_text = pt_get_text(E->pt, offset - 1, 1); undo_push(E->undo_stack, ACTION_DELETE, offset - 1, deleted_text, 1);
     free(deleted_text); pt_delete_fixed(E->pt, offset - 1, 1);
     if (E->cx > 0) E->cx--;
-    else { E->cy--; editor_sync_model(E); vp_sync(E->vp, E->pt, E->li, E->rowoff); int v_idx = E->cy - E->rowoff; if (v_idx >= 0 && v_idx < E->terminal.screenrows) E->cx = E->vp->lines[v_idx].len; }
+    else { E->cy--; editor_sync_model(E); E->cx = (int)get_line_len(E, E->cy); }
     editor_sync_model(E); E->dirty = true; E->dirty_count++; editor_update_swap(E);
 }
 
 void editor_del_char(Editor *E) {
-    int line_count = li_get_line_count(E->li); int v_idx = E->cy - E->rowoff;
-    if (E->cy == line_count - 1 && E->cx == (v_idx >= 0 ? E->vp->lines[v_idx].len : 0)) return;
+    int line_count = li_get_line_count(E->li);
+    if (E->cy == line_count - 1 && E->cx == (int)get_line_len(E, E->cy)) return;
     size_t offset = li_get_offset(E->li, E->cy) + E->cx;
     char *deleted_text = pt_get_text(E->pt, offset, 1); undo_push(E->undo_stack, ACTION_DELETE, offset, deleted_text, 1);
     free(deleted_text); pt_delete_fixed(E->pt, offset, 1); editor_sync_model(E); E->dirty = true; E->dirty_count++; editor_update_swap(E);
@@ -938,7 +986,12 @@ void editor_process_keypress(EditorManager *em) {
                         if (seq[3] == '2') { if (!E->selecting) { E->selecting = true; E->sel_cx = E->cx; E->sel_cy = E->cy; } editor_move_cursor(E, seq[4]); }
                         if (seq[3] == '3') { if (seq[4] == 'C') em_next(em); if (seq[4] == 'D') em_prev(em); }
                     } else if (seq[2] == '~' && seq[1] == '3') { if (E->selecting) editor_delete_selection(E); else editor_del_char(E); }
-                } else { E->selecting = false; editor_move_cursor(E, seq[1]); }
+                } else {
+                    if (seq[0] == '[' && seq[1] == 'w') { E->wrap_enabled = !E->wrap_enabled; break; }
+                    E->selecting = false; editor_move_cursor(E, seq[1]); 
+                }
+            } else if (seq[0] == 'w') { 
+                E->wrap_enabled = !E->wrap_enabled;
             }
             break;
         }

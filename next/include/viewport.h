@@ -12,6 +12,9 @@ typedef struct {
     unsigned char *hl;
     int *cx_to_rx; // Maps byte offset to visual column
     int visual_len;
+    int logical_row; // The actual row in the file
+    int byte_offset; // Start offset within the logical row
+    bool is_wrapped; // True if this visual line is a continuation
 } ViewLine;
 
 typedef struct {
@@ -23,7 +26,8 @@ typedef struct {
 Viewport* vp_create(int rows);
 void vp_destroy(Viewport *vp);
 
-// Sync viewport lines with piece table starting from rowoff
-void vp_sync(Viewport *vp, PieceTable *pt, LineIndex *li, int rowoff);
+// Sync viewport lines with piece table. 
+// wrap_width: available characters for text. 0 or -1 means no wrap.
+void vp_sync(Viewport *vp, PieceTable *pt, LineIndex *li, int rowoff, int wrap_width);
 
 #endif
