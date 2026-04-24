@@ -8,7 +8,7 @@
 #include "undo.h"
 #include "highlight.h"
 
-#define EDITOR_VERSION "2.11.0"
+#define EDITOR_VERSION "2.11.1"
 #define MAX_BUFFERS 32
 
 typedef struct {
@@ -29,6 +29,7 @@ typedef struct {
     bool show_line_numbers;
     int tab_size;
     bool dirty;
+    int dirty_count; // Number of changes since last swap update
     
     EditorSyntax *syntax;
     PieceTable *pt;
