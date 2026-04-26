@@ -301,11 +301,35 @@ static bool is_full_line_selection(Editor *E) {
     return (s_cx == 0 && e_cx >= (int)last_line_len);
 }
 
-static bool is_offset_selected(Editor *E, size_t offset) {
+static int get_first_non_space(Editor *E, int y) {
+    size_t line_start = li_get_offset(E->li, y);
+    size_t line_len = (y + 1 < li_get_line_count(E->li)) ? 
+        li_get_offset(E->li, y + 1) - line_start : 
+        E->pt->total_length - line_start;
+    if (line_len == 0) return 0;
+    char *line = pt_get_text(E->pt, line_start, line_len);
+    int skip = 0;
+    while (skip < (int)line_len && (line[skip] == ' ' || line[skip] == '\t')) skip++;
+    free(line);
+    return skip;
+}
+
+static bool is_char_selected(Editor *E, int row, int col) {
     if (!E->selecting) return false;
+    size_t offset = li_get_offset(E->li, row) + col;
     size_t start = li_get_offset(E->li, E->sel_cy) + E->sel_cx;
     size_t end = li_get_offset(E->li, E->cy) + E->cx;
     if (start > end) { size_t tmp = start; start = end; end = tmp; }
+    if (E->sel_cx == 0) {
+        if (row == E->sel_cy) {
+            int first_ns = get_first_non_space(E, E->sel_cy);
+            if (first_ns > 0 && offset < (size_t)first_ns) return false;
+        } else if (row > E->sel_cy && row <= E->cy) {
+            int first_ns = get_first_non_space(E, row);
+            size_t line_start = li_get_offset(E->li, row);
+            if (first_ns > 0 && offset < line_start + first_ns) return false;
+        }
+    }
     return offset >= start && offset < end;
 }
 
@@ -696,9 +720,10 @@ void editor_refresh_screen(EditorManager *em) {
             if (drawlen > effective_cols) drawlen = effective_cols;
             int start_idx = 0; while (start_idx < vl->len && vl->cx_to_rx[start_idx] < E->coloff) start_idx++;
             int current_color = -1;
+            int row = vl->logical_row;
             for (int j = start_idx; j < vl->len && vl->cx_to_rx[j] < E->coloff + drawlen; j++) {
                 int color = vl->hl[j];
-                if (is_offset_selected(E, (size_t)li_get_offset(E->li, vl->logical_row) + vl->byte_offset + j)) color = HL_SELECT;
+                if (is_char_selected(E, row, vl->byte_offset + j)) color = HL_SELECT;
                 if (color != current_color) { const char *ansi = hl_to_ansi(color); abAppend(&ab, ansi, (int)strlen(ansi)); current_color = color; }
                 abAppend(&ab, &vl->chars[j], 1);
             }

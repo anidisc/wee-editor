@@ -8,7 +8,7 @@
 #include "undo.h"
 #include "highlight.h"
 
-#define EDITOR_VERSION "2.14.0"
+#define EDITOR_VERSION "2.15.MM"
 #define MAX_BUFFERS 32
 
 typedef enum {
