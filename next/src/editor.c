@@ -711,6 +711,8 @@ void editor_replace(EditorManager *em) {
 }
 
 void editor_goto_line(Editor *E) {
+    E->matching_brace_cx = -1;
+    E->matching_brace_cy = -1;
     int total_lines = li_get_line_count(E->li);
     int visible_lines = 0;
     for (int i = 0; i < total_lines; i++) {
@@ -859,6 +861,7 @@ void editor_refresh_screen(EditorManager *em) {
             for (int j = start_idx; j < vl->len && vl->cx_to_rx[j] < E->coloff + drawlen; j++) {
                 int color = vl->hl[j];
                 if (is_char_selected(E, draw_row, vl->byte_offset + j)) color = HL_SELECT;
+                if (draw_row == E->matching_brace_cy && vl->byte_offset + j == (size_t)li_get_offset(E->li, E->matching_brace_cy) + E->matching_brace_cx) color = HL_KEYWORD2;
                 if (color != current_color) { const char *ansi = hl_to_ansi(color); abAppend(&ab, ansi, (int)strlen(ansi)); current_color = color; }
                 abAppend(&ab, &vl->chars[j], 1);
             }
@@ -924,6 +927,8 @@ static int find_prev_visible_line(Editor *E, int from_line) {
 }
 
 void editor_move_cursor(Editor *E, int key) {
+    E->matching_brace_cx = -1;
+    E->matching_brace_cy = -1;
     int line_count = li_get_line_count(E->li);
     int v_idx = -1;
     for (int i = 0; i < E->terminal.screenrows; i++) {
@@ -1313,7 +1318,6 @@ found_open:
 
 void editor_goto_matching_brace(Editor *E) {
     int line_count = li_get_line_count(E->li);
-    size_t current_offset = li_get_offset(E->li, E->cy) + E->cx;
     char *current_line = pt_get_text(E->pt, li_get_offset(E->li, E->cy), get_line_len(E, E->cy));
     if (!current_line) return;
     char current_char = (E->cx >= 0 && E->cx < (int)strlen(current_line)) ? current_line[E->cx] : 0;
@@ -1338,11 +1342,11 @@ void editor_goto_matching_brace(Editor *E) {
             char *l = pt_get_text(E->pt, off, len > 256 ? 256 : len);
             if (!l) continue;
             for (int i = 0; l[i]; i++) {
-                if (y == E->cy && i <= E->cx) continue;
+                if (y == E->cy && i < E->cx) continue;
                 if (l[i] == current_char) brace_count++;
                 else if (l[i] == target_brace) {
                     if (brace_count > 0) brace_count--;
-                    else { E->cx = i; E->cy = y; free(l); return; }
+                    else { E->cx = i; E->cy = y; E->matching_brace_cx = i; E->matching_brace_cy = y; free(l); return; }
                 }
             }
             free(l);
@@ -1353,11 +1357,12 @@ void editor_goto_matching_brace(Editor *E) {
             size_t len = (y + 1 < line_count) ? li_get_offset(E->li, y + 1) - off : E->pt->total_length - off;
             char *l = pt_get_text(E->pt, off, len > 256 ? 256 : len);
             if (!l) continue;
-            for (int i = (y == E->cy) ? E->cx : (int)strlen(l) - 1; i >= 0; i--) {
+            for (int i = (int)strlen(l) - 1; i >= 0; i--) {
+                if (y == E->cy && i > E->cx) continue;
                 if (l[i] == current_char) brace_count++;
                 else if (l[i] == target_brace) {
                     if (brace_count > 0) brace_count--;
-                    else { E->cx = i; E->cy = y; free(l); return; }
+                    else { E->cx = i; E->cy = y; E->matching_brace_cx = i; E->matching_brace_cy = y; free(l); return; }
                 }
             }
             free(l);

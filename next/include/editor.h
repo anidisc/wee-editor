@@ -40,6 +40,7 @@ typedef struct {
     
     int sel_cx, sel_cy; // Selection start point
     bool selecting;
+    int matching_brace_cx, matching_brace_cy;
     char *clipboard;
 
     bool show_line_numbers;
