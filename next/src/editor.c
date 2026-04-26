@@ -1544,14 +1544,23 @@ if (c == '\x1b') {
                         size_t off = li_get_offset(E->li, open_y);
                         size_t nxt = li_get_offset(E->li, open_y + 1);
                         char *first_line = pt_get_text(E->pt, off, nxt - off);
-                        int start = open_x + 1;
-                        if (first_line) {
-                            int len = (int)strlen(first_line);
-                            while (start < len && (first_line[start] == ' ' || first_line[start] == '\t')) start++;
-                            free(first_line);
+                        if (!first_line) return;
+                        for (int i = 0; i <= open_x; i++) {
+                            if (first_line[i] != ' ' && first_line[i] != '\t' && first_line[i] != '\0') {
+                                E->sel_cx = 0;
+                                E->sel_cy = open_y + 1;
+                                free(first_line);
+                                goto select_multiline;
+                            }
                         }
+                        int start = open_x + 1;
+                        int len = (int)strlen(first_line);
+                        while (start < len && (first_line[start] == ' ' || first_line[start] == '\t')) start++;
                         E->sel_cx = start;
                         E->sel_cy = open_y;
+                        free(first_line);
+                        
+                        select_multiline:
                         E->cy = close_y - 1;
                         off = li_get_offset(E->li, E->cy);
                         nxt = li_get_offset(E->li, close_y);
