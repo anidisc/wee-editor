@@ -859,6 +859,7 @@ void editor_refresh_screen(EditorManager *em) {
             for (int j = start_idx; j < vl->len && vl->cx_to_rx[j] < E->coloff + drawlen; j++) {
                 int color = vl->hl[j];
                 if (is_char_selected(E, draw_row, vl->byte_offset + j)) color = HL_SELECT;
+                else if (E->match_cy >= 0 && draw_row == E->match_cy && vl->byte_offset + j == (size_t)E->match_cx) color = HL_KEYWORD2;
                 if (color != current_color) { const char *ansi = hl_to_ansi(color); abAppend(&ab, ansi, (int)strlen(ansi)); current_color = color; }
                 abAppend(&ab, &vl->chars[j], 1);
             }
@@ -970,6 +971,79 @@ void editor_move_cursor(Editor *E, int key) {
             else if (E->cy < line_count - 1) { E->cy++; E->cx = 0; }
             break;
     }
+    
+    E->match_cx = -1;
+    E->match_cy = -1;
+    
+    if (E->cy < 0 || E->cy >= line_count) return;
+    
+    size_t off = li_get_offset(E->li, E->cy);
+    size_t nxt = (E->cy + 1 < line_count) ? li_get_offset(E->li, E->cy + 1) : E->pt->total_length;
+    if (off >= nxt) return;
+    
+    char *ln = pt_get_text(E->pt, off, nxt - off);
+    if (!ln) return;
+    
+    if (E->cx >= 0 && E->cx < (int)strlen(ln)) {
+        char ch = ln[E->cx];
+        char search = 0;
+        int dir = 0;
+        
+        if (ch == '{') { search = '}'; dir = 1; }
+        else if (ch == '(') { search = ')'; dir = 1; }
+        else if (ch == '[') { search = ']'; dir = 1; }
+        else if (ch == '}') { search = '{'; dir = -1; }
+        else if (ch == ')') { search = '('; dir = -1; }
+        else if (ch == ']') { search = '['; dir = -1; }
+        
+        if (search) {
+            int start_y = E->cy;
+            int start_x = E->cx;
+            int match_y = -1, match_x = -1;
+            int depth = 0;
+            
+            if (dir == 1) {
+                for (int y = start_y; y < line_count && match_y < 0; y++) {
+                    size_t yoff = li_get_offset(E->li, y);
+                    size_t ynext = (y + 1 < line_count) ? li_get_offset(E->li, y + 1) : E->pt->total_length;
+                    char *yl = pt_get_text(E->pt, yoff, ynext - yoff);
+                    if (!yl) continue;
+                    for (int x = 0; yl[x]; x++) {
+                        if (y == start_y && x <= start_x) continue;
+                        if (yl[x] == ch) depth++;
+                        else if (yl[x] == search) {
+                            if (depth > 0) depth--;
+                            else { match_y = y; match_x = x; }
+                        }
+                    }
+                    free(yl);
+                }
+            } else {
+                for (int y = start_y; y >= 0 && match_y < 0; y--) {
+                    size_t yoff = li_get_offset(E->li, y);
+                    size_t ynext = (y + 1 < line_count) ? li_get_offset(E->li, y + 1) : E->pt->total_length;
+                    char *yl = pt_get_text(E->pt, yoff, ynext - yoff);
+                    if (!yl) continue;
+                    int len = (int)strlen(yl);
+                    for (int x = len - 1; x >= 0; x--) {
+                        if (y == start_y && x >= start_x) continue;
+                        if (yl[x] == ch) depth++;
+                        else if (yl[x] == search) {
+                            if (depth > 0) depth--;
+                            else { match_y = y; match_x = x; }
+                        }
+                    }
+                    free(yl);
+                }
+            }
+            
+            if (match_y >= 0 && match_x >= 0) {
+                E->match_cx = match_x;
+                E->match_cy = match_y;
+            }
+        }
+    }
+    free(ln);
 }
 
 void editor_insert_char(Editor *E, int c) {
