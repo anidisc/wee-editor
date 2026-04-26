@@ -1524,10 +1524,27 @@ if (c == '\x1b') {
                         E->selecting = false;
                         return;
                     }
-                    E->sel_cx = open_x + 1;
-                    E->sel_cy = open_y;
-                    E->cx = (close_x > 0) ? close_x - 1 : 0;
-                    E->cy = close_y;
+                    
+                    if (open_y == close_y) {
+                        E->sel_cx = open_x + 1;
+                        E->sel_cy = open_y;
+                        E->cx = close_x - 1;
+                        E->cy = close_y;
+                    } else {
+                        E->sel_cx = open_x + 1;
+                        E->sel_cy = open_y;
+                        E->cy = close_y - 1;
+                        int last_line_len = 0;
+                        size_t off = li_get_offset(E->li, E->cy);
+                        size_t nxt = li_get_offset(E->li, close_y);
+                        char *last_line = pt_get_text(E->pt, off, nxt - off);
+                        if (last_line) {
+                            last_line_len = (int)strlen(last_line);
+                            while (last_line_len > 0 && (last_line[last_line_len - 1] == ' ' || last_line[last_line_len - 1] == '\t')) last_line_len--;
+                            free(last_line);
+                        }
+                        E->cx = last_line_len;
+                    }
                     E->selecting = true;
                 }
             }
