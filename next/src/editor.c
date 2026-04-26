@@ -1422,6 +1422,10 @@ if (c == '\x1b') {
             editor_select_block(E);
             return;
         }
+        if (seq[0] == 'm') {
+            editor_goto_matching_brace(E);
+            return;
+        }
         if (seq[0] == 'j') {
             editor_goto_matching_brace(E);
             return;
