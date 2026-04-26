@@ -1332,6 +1332,10 @@ if (c == '\x1b') {
                 if (editor_handle_mouse(E)) return;
             } else if (seq[1] == 'm') {
                 return;
+            } else if (seq[1] == '3' && read(STDIN_FILENO, &seq[2], 1) == 1 && seq[2] == '~') {
+                if (E->selecting) editor_delete_selection(E);
+                else editor_del_char(E);
+                return;
             } else if (seq[1] == '1' && read(STDIN_FILENO, &seq[2], 1) == 1 && seq[2] == ';' && read(STDIN_FILENO, &seq[3], 1) == 1 && read(STDIN_FILENO, &seq[4], 1) == 1) {
                 if (seq[3] == '2' && seq[4] >= 'A' && seq[4] <= 'D') {
                     if (!E->selecting) { E->selecting = true; E->sel_cx = E->cx; E->sel_cy = E->cy; }
