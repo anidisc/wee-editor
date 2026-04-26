@@ -855,6 +855,13 @@ void editor_refresh_screen(EditorManager *em) {
             if (drawlen > effective_cols) drawlen = effective_cols;
             int start_idx = 0; while (start_idx < vl->len && vl->cx_to_rx[start_idx] < E->coloff) start_idx++;
             int draw_row = vl->logical_row;
+            int current_color = -1;
+            for (int j = start_idx; j < vl->len && vl->cx_to_rx[j] < E->coloff + drawlen; j++) {
+                int color = vl->hl[j];
+                if (is_char_selected(E, draw_row, vl->byte_offset + j)) color = HL_SELECT;
+                if (color != current_color) { const char *ansi = hl_to_ansi(color); abAppend(&ab, ansi, (int)strlen(ansi)); current_color = color; }
+                abAppend(&ab, &vl->chars[j], 1);
+            }
             for (int f = 0; f < E->fold_count; f++) {
                 if (draw_row == E->folds[f].start && E->folds[f].end > draw_row) {
                     int fold_lines = E->folds[f].end - E->folds[f].start;
@@ -863,13 +870,6 @@ void editor_refresh_screen(EditorManager *em) {
                     abAppend(&ab, fold_indicator, n);
                     break;
                 }
-            }
-            int current_color = -1;
-            for (int j = start_idx; j < vl->len && vl->cx_to_rx[j] < E->coloff + drawlen; j++) {
-                int color = vl->hl[j];
-                if (is_char_selected(E, draw_row, vl->byte_offset + j)) color = HL_SELECT;
-                if (color != current_color) { const char *ansi = hl_to_ansi(color); abAppend(&ab, ansi, (int)strlen(ansi)); current_color = color; }
-                abAppend(&ab, &vl->chars[j], 1);
             }
             abAppend(&ab, "\x1b[m", 3);
         }
