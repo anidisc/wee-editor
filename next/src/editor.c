@@ -1325,6 +1325,82 @@ if (c == '\x1b') {
             editor_toggle_fold(E);
             return;
         }
+        if (seq[0] == 'j') {
+            int line_count = li_get_line_count(E->li);
+            if (E->cy < 0 || E->cy >= line_count) return;
+            
+            size_t off = li_get_offset(E->li, E->cy);
+            size_t nxt = (E->cy + 1 < line_count) ? li_get_offset(E->li, E->cy + 1) : E->pt->total_length;
+            if (off >= nxt) return;
+            
+            char *buf = pt_get_text(E->pt, off, nxt - off);
+            if (!buf) return;
+            
+            int cx = E->cx;
+            if (cx < 0 || cx >= (int)strlen(buf)) cx = strlen(buf) - 1;
+            if (cx < 0) { free(buf); return; }
+            
+            char ch = buf[cx];
+            free(buf);
+            
+            char search = 0;
+            int dir = 0;
+            
+            if (ch == '{') { search = '}'; dir = 1; }
+            else if (ch == '(') { search = ')'; dir = 1; }
+            else if (ch == '[') { search = ']'; dir = 1; }
+            else if (ch == '}') { search = '{'; dir = -1; }
+            else if (ch == ')') { search = '('; dir = -1; }
+            else if (ch == ']') { search = '['; dir = -1; }
+            
+            if (search == 0) return;
+            
+            int start_y = E->cy;
+            int start_x = E->cx;
+            int match_y = -1, match_x = -1;
+            int depth = 0;
+            
+            if (dir == 1) {
+                for (int y = start_y; y < line_count && match_y < 0; y++) {
+                    size_t yoff = li_get_offset(E->li, y);
+                    size_t ynext = (y + 1 < line_count) ? li_get_offset(E->li, y + 1) : E->pt->total_length;
+                    char *ln = pt_get_text(E->pt, yoff, ynext - yoff);
+                    if (!ln) continue;
+                    for (int x = 0; ln[x]; x++) {
+                        if (y == start_y && x <= start_x) continue;
+                        if (ln[x] == ch) depth++;
+                        else if (ln[x] == search) {
+                            if (depth > 0) depth--;
+                            else { match_y = y; match_x = x; }
+                        }
+                    }
+                    free(ln);
+                }
+            } else {
+                for (int y = start_y; y >= 0 && match_y < 0; y--) {
+                    size_t yoff = li_get_offset(E->li, y);
+                    size_t ynext = (y + 1 < line_count) ? li_get_offset(E->li, y + 1) : E->pt->total_length;
+                    char *ln = pt_get_text(E->pt, yoff, ynext - yoff);
+                    if (!ln) continue;
+                    int len = (int)strlen(ln);
+                    for (int x = len - 1; x >= 0; x--) {
+                        if (y == start_y && x >= start_x) continue;
+                        if (ln[x] == ch) depth++;
+                        else if (ln[x] == search) {
+                            if (depth > 0) depth--;
+                            else { match_y = y; match_x = x; }
+                        }
+                    }
+                    free(ln);
+                }
+            }
+            
+            if (match_y >= 0 && match_x >= 0) {
+                E->cy = match_y;
+                E->cx = match_x;
+            }
+            return;
+        }
         if (seq[0] == '[') {
             n = read(STDIN_FILENO, &seq[1], 1);
             if (n != 1) { E->selecting = false; return; }
