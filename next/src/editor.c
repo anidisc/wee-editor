@@ -1291,8 +1291,9 @@ found_open:
     size_t line_start = li_get_offset(E->li, brace_line);
     size_t line_end = (brace_line + 1 < line_count) ? li_get_offset(E->li, brace_line + 1) : E->pt->total_length;
     if (line_start >= line_end) return;
-    E->sel_cx = brace_offset;
+    E->sel_cx = brace_offset + 1;
     E->sel_cy = brace_line;
+    E->selecting = true;
     for (int y = brace_line + 1; y < line_count; y++) {
         size_t off = li_get_offset(E->li, y);
         size_t len = (y + 1 < line_count) ? li_get_offset(E->li, y + 1) - off : E->pt->total_length - off;
@@ -1300,9 +1301,8 @@ found_open:
         if (!l) continue;
         for (int i = 0; l[i]; i++) {
             if (l[i] == '}') {
-                E->cx = i;
+                E->cx = i - 1;
                 E->cy = y;
-                E->selecting = true;
                 free(l);
                 return;
             }
