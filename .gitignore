@@ -1,5 +1,8 @@
 *.txt
 wee
+wee-next
+next/obj/
+next/wee-next
 *test
 *.html
 /log
