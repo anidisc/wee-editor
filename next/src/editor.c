@@ -1422,6 +1422,10 @@ if (c == '\x1b') {
             editor_select_block(E);
             return;
         }
+        if (seq[0] == 'j') {
+            editor_goto_matching_brace(E);
+            return;
+        }
         if (seq[0] == '[') {
             n = read(STDIN_FILENO, &seq[1], 1);
             if (n != 1) { E->selecting = false; return; }
@@ -1463,7 +1467,6 @@ if (c == '\x1b') {
         case ctrl_key('r'): editor_replace(em); break;
         case ctrl_key('j'): editor_goto_line(E); break;
         case ctrl_key('k'): editor_delete_line(E); break;
-        case ctrl_key('_'): editor_goto_matching_brace(E); break;
         case ctrl_key('o'): {
             char *selected = file_browser_open(E); if (selected) { em_add_buffer(em, selected); free(selected); }
             break;
