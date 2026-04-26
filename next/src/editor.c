@@ -314,6 +314,53 @@ static int get_first_non_space(Editor *E, int y) {
     return skip;
 }
 
+static bool editor_handle_mouse(Editor *E) {
+    unsigned char b1, b2, b3;
+    if (read(STDIN_FILENO, &b1, 1) != 1) return false;
+    if (read(STDIN_FILENO, &b2, 1) != 1) return false;
+    if (read(STDIN_FILENO, &b3, 1) != 1) return false;
+    
+    int btn = b1 - 32;
+    int x = b2 - 32;
+    int y = b3 - 32;
+    x--; y--;
+    
+    int line_count = li_get_line_count(E->li);
+    int ln_width = E->show_line_numbers ? snprintf(NULL, 0, "%d", line_count) + 1 : 0;
+    y -= 1;
+    x -= ln_width + 1;
+    
+    if (y < 0 || y >= E->terminal.screenrows || x < 0) return true;
+    
+    int target_y = y + E->rowoff;
+    int target_x = x + E->coloff;
+    if (target_y >= line_count) target_y = line_count - 1;
+    if (target_y < 0) target_y = 0;
+    
+    if (btn == 0) {
+        E->selecting = true; E->sel_cy = target_y; E->sel_cx = 0;
+    } else if (btn == 35) {
+        E->selecting = false;
+    }
+    
+    E->cy = target_y;
+    ViewLine *vl = NULL;
+    for (int i = 0; i < E->terminal.screenrows; i++) {
+        if (E->vp->lines[i].chars && E->vp->lines[i].logical_row == target_y) {
+            vl = &E->vp->lines[i];
+            break;
+        }
+    }
+    if (vl) {
+        E->cx = target_x + vl->byte_offset;
+        if (E->cx > vl->byte_offset + vl->len) E->cx = vl->byte_offset + vl->len;
+        if (E->cx < vl->byte_offset) E->cx = vl->byte_offset;
+    } else {
+        E->cx = target_x;
+    }
+    return true;
+}
+
 static bool is_char_selected(Editor *E, int row, int col) {
     if (!E->selecting) return false;
     size_t offset = li_get_offset(E->li, row) + col;
@@ -987,6 +1034,37 @@ void editor_toggle_comment(Editor *E) {
 void editor_process_keypress(EditorManager *em) {
     Editor *E = em_get_active(em); if (!E) return;
     char c; if (read(STDIN_FILENO, &c, 1) <= 0) return;
+
+if (c == '\x1b') {
+        char seq[8] = {0};
+        ssize_t n = read(STDIN_FILENO, &seq[0], 1);
+        if (n != 1) { E->selecting = false; return; }
+        if (seq[0] == 'w') {
+            E->wrap_enabled = !E->wrap_enabled; return;
+        }
+        if (seq[0] == '[') {
+            n = read(STDIN_FILENO, &seq[1], 1);
+            if (n != 1) { E->selecting = false; return; }
+            if (seq[1] == 'M') {
+                if (editor_handle_mouse(E)) return;
+            } else if (seq[1] == 'm') {
+                return;
+            } else if (seq[1] == '1' && read(STDIN_FILENO, &seq[2], 1) == 1 && seq[2] == ';' && read(STDIN_FILENO, &seq[3], 1) == 1 && read(STDIN_FILENO, &seq[4], 1) == 1) {
+                if (seq[3] == '2' && seq[4] >= 'A' && seq[4] <= 'D') {
+                    if (!E->selecting) { E->selecting = true; E->sel_cx = E->cx; E->sel_cy = E->cy; }
+                    editor_move_cursor(E, seq[4]); return;
+                }
+                if (seq[3] == '3') {
+                    if (seq[4] == 'C') { em_next(em); return; }
+                    if (seq[4] == 'D') { em_prev(em); return; }
+                }
+            }
+            if (seq[1] >= 'A' && seq[1] <= 'D') { E->selecting = false; editor_move_cursor(E, seq[1]); return; }
+            if (seq[1] == 'w') { E->wrap_enabled = !E->wrap_enabled; return; }
+        }
+        E->selecting = false;
+    }
+
     switch (c) {
         case '\r': editor_insert_newline(E); break;
         case '\t': if (E->selecting) editor_indent_selection(E, 1); else editor_insert_tab(E); break;
@@ -1018,28 +1096,6 @@ void editor_process_keypress(EditorManager *em) {
         case ctrl_key('v'): editor_paste(E); break;
         case ctrl_key('n'): E->show_line_numbers = !E->show_line_numbers; break;
         case 127: if (E->selecting) editor_indent_selection(E, -1); else editor_delete_char(E); break;
-        case '\x1b': {
-            char seq[5]; if (read(STDIN_FILENO, &seq[0], 1) != 1) break;
-            if (seq[0] == 'O') {
-                if (read(STDIN_FILENO, &seq[1], 1) != 1) break; if (seq[1] == 'P') editor_show_help(E);
-            } else if (seq[0] == '[') {
-                if (read(STDIN_FILENO, &seq[1], 1) != 1) break;
-                if (seq[1] >= '0' && seq[1] <= '9') {
-                    if (read(STDIN_FILENO, &seq[2], 1) != 1) break;
-                    if (seq[2] == ';') {
-                        if (read(STDIN_FILENO, &seq[3], 1) != 1) break; if (read(STDIN_FILENO, &seq[4], 1) != 1) break;
-                        if (seq[3] == '2') { if (!E->selecting) { E->selecting = true; E->sel_cx = E->cx; E->sel_cy = E->cy; } editor_move_cursor(E, seq[4]); }
-                        if (seq[3] == '3') { if (seq[4] == 'C') em_next(em); if (seq[4] == 'D') em_prev(em); }
-                    } else if (seq[2] == '~' && seq[1] == '3') { if (E->selecting) editor_delete_selection(E); else editor_del_char(E); }
-                } else {
-                    if (seq[0] == '[' && seq[1] == 'w') { E->wrap_enabled = !E->wrap_enabled; break; }
-                    E->selecting = false; editor_move_cursor(E, seq[1]); 
-                }
-            } else if (seq[0] == 'w') { 
-                E->wrap_enabled = !E->wrap_enabled;
-            }
-            break;
-        }
         default: if (c == '/' && E->selecting) { editor_toggle_comment(E); E->selecting = false; break; }
                  if (!iscntrl(c)) { E->selecting = false; editor_insert_char(E, c); } break;
     }

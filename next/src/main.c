@@ -30,11 +30,12 @@ int main(int argc, char **argv) {
     Editor *active = em_get_active(&EM);
     if (!active) exit(1);
     
-    // Salva lo stato del terminale all'inizio usando una struttura pulita
     Terminal main_term;
     memset(&main_term, 0, sizeof(Terminal));
     terminal_enable_raw(&main_term);
     signal(SIGWINCH, handle_sigwinch);
+
+    write(STDOUT_FILENO, "\x1b[?1000h\x1b[?1002h", 16);
 
     while (1) {
         if (resize_pending) {
@@ -47,7 +48,7 @@ int main(int argc, char **argv) {
         if (EM.count == 0) break;
     }
 
-    // --- CLEANUP ON EXIT ---
+    write(STDOUT_FILENO, "\x1b[?1000l\x1b[?1002l", 16);
     terminal_disable_raw(&main_term); 
     write(STDOUT_FILENO, "\x1b[2J\x1b[H", 7);
     
