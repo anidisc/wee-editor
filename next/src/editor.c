@@ -1272,6 +1272,45 @@ void editor_toggle_fold(Editor *E) {
     }
 }
 
+void editor_select_block(Editor *E) {
+    int line_count = li_get_line_count(E->li);
+    int brace_line = E->cy;
+    size_t brace_offset = 0;
+    for (int y = E->cy; y >= 0; y--) {
+        size_t off = li_get_offset(E->li, y);
+        size_t len = (y + 1 < line_count) ? li_get_offset(E->li, y + 1) - off : E->pt->total_length - off;
+        char *l = pt_get_text(E->pt, off, len > 256 ? 256 : len);
+        if (!l) continue;
+        for (int i = 0; l[i]; i++) {
+            if (l[i] == '{') { brace_line = y; brace_offset = i; free(l); goto found_open; }
+        }
+        free(l);
+    }
+    return;
+found_open:
+    size_t line_start = li_get_offset(E->li, brace_line);
+    size_t line_end = (brace_line + 1 < line_count) ? li_get_offset(E->li, brace_line + 1) : E->pt->total_length;
+    if (line_start >= line_end) return;
+    E->sel_cx = brace_offset;
+    E->sel_cy = brace_line;
+    for (int y = brace_line + 1; y < line_count; y++) {
+        size_t off = li_get_offset(E->li, y);
+        size_t len = (y + 1 < line_count) ? li_get_offset(E->li, y + 1) - off : E->pt->total_length - off;
+        char *l = pt_get_text(E->pt, off, len > 256 ? 256 : len);
+        if (!l) continue;
+        for (int i = 0; l[i]; i++) {
+            if (l[i] == '}') {
+                E->cx = i;
+                E->cy = y;
+                E->selecting = true;
+                free(l);
+                return;
+            }
+        }
+        free(l);
+    }
+}
+
 void editor_fold(Editor *E) {
     int line_count = li_get_line_count(E->li);
     if (E->cy >= line_count || E->fold_count >= MAX_FOLDS) return;
@@ -1323,6 +1362,10 @@ if (c == '\x1b') {
         }
         if (seq[0] == 'f') {
             editor_toggle_fold(E);
+            return;
+        }
+        if (seq[0] == 'b') {
+            editor_select_block(E);
             return;
         }
         if (seq[0] == '[') {
