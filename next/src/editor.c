@@ -1008,6 +1008,57 @@ void editor_redo(Editor *E) {
     editor_sync_model(E); E->dirty = true; E->dirty_count++; editor_update_swap(E);
 }
 
+void editor_set_syntax(Editor *E) {
+    int count = hl_get_syntax_count();
+    int selected = 0;
+    if (E->syntax) {
+        for (int i = 0; i < count; i++) {
+            if (hl_get_syntax_by_index(i) == E->syntax) {
+                selected = i; break;
+            }
+        }
+    }
+    while (1) {
+        struct abuf ab = ABUF_INIT;
+        abAppend(&ab, "\x1b[?25l", 6);
+        char header[256];
+        int hlen = snprintf(header, sizeof(header), "\x1b[2;1H\x1b[1;33m SELECT FILETYPE \x1b[m> ");
+        abAppend(&ab, header, hlen);
+        int rows_to_show = count + 2;
+        if (rows_to_show > E->terminal.screenrows - 2) rows_to_show = E->terminal.screenrows - 2;
+        for (int i = 0; i < rows_to_show; i++) {
+            char move[32]; snprintf(move, sizeof(move), "\x1b[%d;1H", i + 3);
+            abAppend(&ab, move, (int)strlen(move));
+            if (i < count) {
+                if (i == selected) abAppend(&ab, "\x1b[7m > ", 7);
+                else abAppend(&ab, "   ", 3);
+                EditorSyntax *s = hl_get_syntax_by_index(i);
+                abAppend(&ab, s->filetype, (int)strlen(s->filetype));
+                abAppend(&ab, "\x1b[m\x1b[K", 6);
+            } else {
+                abAppend(&ab, "\x1b[K", 3);
+            }
+        }
+        write(STDOUT_FILENO, ab.b, ab.len); abFree(&ab);
+        char c;
+        if (read(STDIN_FILENO, &c, 1) <= 0) continue;
+        if (c == '\x1b') {
+            char seq[4];
+            if (read(STDIN_FILENO, &seq[0], 1) == 1 && seq[0] == '[') {
+                if (read(STDIN_FILENO, &seq[1], 1) == 1) {
+                    if (seq[1] == 'A') { selected--; if (selected < 0) selected = count - 1; }
+                    else if (seq[1] == 'B') { selected++; if (selected >= count) selected = 0; }
+                }
+            }
+            continue;
+        }
+        if (c == '\r') {
+            E->syntax = hl_get_syntax_by_index(selected);
+            return;
+        }
+    }
+}
+
 void editor_toggle_comment(Editor *E) {
     if (!E->syntax || !E->syntax->singleline_comment_start) return;
     int start_y = E->sel_cy, end_y = E->cy; if (start_y > end_y) { int t = start_y; start_y = end_y; end_y = t; }
@@ -1095,6 +1146,7 @@ if (c == '\x1b') {
         case ctrl_key('x'): editor_cut(E); break;
         case ctrl_key('v'): editor_paste(E); break;
         case ctrl_key('n'): E->show_line_numbers = !E->show_line_numbers; break;
+        case ctrl_key('t'): editor_set_syntax(E); break;
         case 127: if (E->selecting) editor_indent_selection(E, -1); else editor_delete_char(E); break;
         default: if (c == '/' && E->selecting) { editor_toggle_comment(E); E->selecting = false; break; }
                  if (!iscntrl(c)) { E->selecting = false; editor_insert_char(E, c); } break;

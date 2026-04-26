@@ -29,5 +29,7 @@ typedef struct {
 void hl_apply(const char *text, int len, unsigned char *hl_buffer, EditorSyntax *syntax);
 const char* hl_to_ansi(unsigned char hl_type);
 EditorSyntax* hl_get_syntax(const char *filename);
+int hl_get_syntax_count(void);
+EditorSyntax* hl_get_syntax_by_index(int idx);
 
 #endif

@@ -159,6 +159,15 @@ EditorSyntax* hl_get_syntax(const char *filename) {
     return NULL;
 }
 
+int hl_get_syntax_count(void) {
+    return HLDB_ENTRIES;
+}
+
+EditorSyntax* hl_get_syntax_by_index(int idx) {
+    if (idx < 0 || idx >= HLDB_ENTRIES) return NULL;
+    return &HLDB[idx];
+}
+
 const char* hl_to_ansi(unsigned char hl_type) {
     switch (hl_type) {
         case HL_NUMBER: return "\x1b[31m";
