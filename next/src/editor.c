@@ -1329,46 +1329,45 @@ void editor_goto_matching_brace(Editor *E) {
     if (!current_line) return;
     
     int cx = E->cx;
-    if (cx < 0 || cx >= (int)line_len) cx = (int)line_len - 1;
-    if (cx < 0) { free(current_line); return; }
+    if (cx < 0) cx = 0;
+    if (cx >= (int)line_len) cx = (int)line_len - 1;
     
     char current_char = current_line[cx];
     free(current_line);
     
-    int open_brace = 0;
-    int close_brace = 0;
+    if (current_char != '{' && current_char != '}' && current_char != '(' && current_char != ')' && current_char != '[' && current_char != ']') return;
     
-    if (current_char == '{') { open_brace = '{'; close_brace = '}'; }
-    else if (current_char == '(') { open_brace = '('; close_brace = ')'; }
-    else if (current_char == '[') { open_brace = '['; close_brace = ']'; }
-    else if (current_char == '}') { close_brace = '{'; open_brace = '}'; }
-    else if (current_char == ')') { close_brace = '('; open_brace = ')'; }
-    else if (current_char == ']') { close_brace = '['; open_brace = ']'; }
+    int target;
+    if (current_char == '{') target = '}';
+    else if (current_char == '(') target = ')';
+    else if (current_char == '[') target = ']';
+    else if (current_char == '}') target = '{';
+    else if (current_char == ')') target = '(';
+    else if (current_char == ']') target = '[';
+    else return;
     
-    if (open_brace == 0 || close_brace == 0) return;
+    int is_open = (current_char == '{' || current_char == '(' || current_char == '[');
+    int target_is_open = (target == '{' || target == '(' || target == '[');
     
-    int forward = (open_brace != 0 && current_char == open_brace);
     int original_cx = E->cx;
     int original_cy = E->cy;
-    
     E->matching_brace_cx = original_cx;
     E->matching_brace_cy = original_cy;
     
     int depth = 0;
     
-    if (forward) {
+    if (is_open && !target_is_open) {
         for (int y = E->cy; y < line_count; y++) {
             size_t y_start = li_get_offset(E->li, y);
             size_t y_end = (y + 1 < line_count) ? li_get_offset(E->li, y + 1) : E->pt->total_length;
-            size_t y_len = y_end - y_start;
-            char *line = pt_get_text(E->pt, y_start, y_len);
+            char *line = pt_get_text(E->pt, y_start, y_end - y_start);
             if (!line) continue;
             
             for (int i = 0; line[i]; i++) {
-                if (y == E->cy && i < original_cx) continue;
+                if (y == original_cy && i < original_cx) continue;
                 
-                if (line[i] == open_brace) depth++;
-                else if (line[i] == close_brace) {
+                if (line[i] == current_char) depth++;
+                else if (line[i] == target) {
                     if (depth > 0) depth--;
                     else {
                         E->cx = i;
@@ -1382,20 +1381,19 @@ void editor_goto_matching_brace(Editor *E) {
             }
             free(line);
         }
-    } else {
+    } else if (!is_open && target_is_open) {
         for (int y = E->cy; y >= 0; y--) {
             size_t y_start = li_get_offset(E->li, y);
             size_t y_end = (y + 1 < line_count) ? li_get_offset(E->li, y + 1) : E->pt->total_length;
-            size_t y_len = y_end - y_start;
-            char *line = pt_get_text(E->pt, y_start, y_len);
+            char *line = pt_get_text(E->pt, y_start, y_end - y_start);
             if (!line) continue;
             
             int i_max = strlen(line);
             for (int i = i_max - 1; i >= 0; i--) {
-                if (y == E->cy && i > original_cx) continue;
+                if (y == original_cy && i > original_cx) continue;
                 
-                if (line[i] == open_brace) depth++;
-                else if (line[i] == close_brace) {
+                if (line[i] == current_char) depth++;
+                else if (line[i] == target) {
                     if (depth > 0) depth--;
                     else {
                         E->cx = i;
