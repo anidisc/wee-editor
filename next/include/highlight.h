@@ -7,6 +7,7 @@ typedef enum {
     HL_STRING,
     HL_KEYWORD1,
     HL_KEYWORD2,
+    HL_TYPE,
     HL_COMMENT,
     HL_MLCOMMENT,
     HL_MATCH,
@@ -20,6 +21,7 @@ typedef struct {
     char *filetype;
     char **filematch;
     char **keywords;
+    char **types;
     char *singleline_comment_start;
     char *multiline_comment_start;
     char *multiline_comment_end;
