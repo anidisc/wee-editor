@@ -1520,9 +1520,13 @@ if (c == '\x1b') {
                 found_close:
                 
                 if (close_y >= 0) {
+                    if (open_y == close_y && open_x + 1 >= close_x - 1) {
+                        E->selecting = false;
+                        return;
+                    }
                     E->sel_cx = open_x + 1;
                     E->sel_cy = open_y;
-                    E->cx = close_x - 1;
+                    E->cx = (close_x > 0) ? close_x - 1 : 0;
                     E->cy = close_y;
                     E->selecting = true;
                 }
