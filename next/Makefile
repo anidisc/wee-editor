@@ -22,7 +22,7 @@ OBJ_DIR = obj
 SRCS = $(wildcard $(SRC_DIR)/*.c)
 OBJS = $(SRCS:$(SRC_DIR)/%.c=$(OBJ_DIR)/%.o)
 
-TARGET = wee-next
+TARGET = wee
 
 .PHONY: all clean arch
 

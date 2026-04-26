@@ -379,14 +379,11 @@ static int logical_to_visual_line(Editor *E, int logical_line) {
 static int visual_to_logical_line(Editor *E, int visual_line) {
     int line_count = li_get_line_count(E->li);
     int current = 0;
-    for (int i = 0; i < line_count && current < visual_line; i++) {
-        int fold_idx = is_folded(E, i);
-        if (fold_idx < 0) current++;
-    }
     for (int i = 0; i < line_count; i++) {
-        int fold_idx = is_folded(E, i);
-        if (fold_idx < 0 && current == visual_line) return i;
-        if (fold_idx < 0) current++;
+        if (is_folded(E, i) < 0) {
+            if (current == visual_line) return i;
+            current++;
+        }
     }
     return line_count - 1;
 }
