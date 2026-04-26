@@ -1318,75 +1318,96 @@ found_open:
 
 void editor_goto_matching_brace(Editor *E) {
     int line_count = li_get_line_count(E->li);
+    if (E->cy < 0 || E->cy >= line_count) return;
+    
     size_t line_start = li_get_offset(E->li, E->cy);
-    size_t line_len = (E->cy + 1 < line_count) ? li_get_offset(E->li, E->cy + 1) - line_start : E->pt->total_length - line_start;
-    if (line_len == 0) return;
+    size_t line_end = (E->cy + 1 < line_count) ? li_get_offset(E->li, E->cy + 1) : E->pt->total_length;
+    if (line_start >= line_end) return;
+    
+    size_t line_len = line_end - line_start;
     char *current_line = pt_get_text(E->pt, line_start, line_len);
     if (!current_line) return;
-    if (E->cx >= (int)line_len) E->cx = line_len - 1;
-    char current_char = current_line[E->cx];
+    
+    int cx = E->cx;
+    if (cx < 0 || cx >= (int)line_len) cx = (int)line_len - 1;
+    if (cx < 0) { free(current_line); return; }
+    
+    char current_char = current_line[cx];
     free(current_line);
-    if (current_char != '{' && current_char != '}' && current_char != '(' && current_char != ')' && current_char != '[' && current_char != ']') return;
-    int target_brace = 0;
-    if (current_char == '{') target_brace = '}';
-    else if (current_char == '(') target_brace = ')';
-    else if (current_char == '[') target_brace = ']';
-    else if (current_char == '}') target_brace = '{';
-    else if (current_char == ')') target_brace = '(';
-    else if (current_char == ']') target_brace = '[';
-    if (target_brace == 0) return;
+    
+    int open_brace = 0;
+    int close_brace = 0;
+    
+    if (current_char == '{') { open_brace = '{'; close_brace = '}'; }
+    else if (current_char == '(') { open_brace = '('; close_brace = ')'; }
+    else if (current_char == '[') { open_brace = '['; close_brace = ']'; }
+    else if (current_char == '}') { close_brace = '{'; open_brace = '}'; }
+    else if (current_char == ')') { close_brace = '('; open_brace = ')'; }
+    else if (current_char == ']') { close_brace = '['; open_brace = ']'; }
+    
+    if (open_brace == 0 || close_brace == 0) return;
+    
+    int forward = (open_brace != 0 && current_char == open_brace);
     int original_cx = E->cx;
     int original_cy = E->cy;
+    
     E->matching_brace_cx = original_cx;
     E->matching_brace_cy = original_cy;
-    int forward = (current_char == '{' || current_char == '(' || current_char == '[');
-    int brace_count = 0;
+    
+    int depth = 0;
+    
     if (forward) {
         for (int y = E->cy; y < line_count; y++) {
-            size_t off = li_get_offset(E->li, y);
-            size_t len = (y + 1 < line_count) ? li_get_offset(E->li, y + 1) - off : E->pt->total_length - off;
-            char *l = pt_get_text(E->pt, off, len);
-            if (!l) continue;
-            for (int i = 0; l[i]; i++) {
-                if (y == E->cy && i < E->cx) continue;
-                if (l[i] == current_char) brace_count++;
-                else if (l[i] == target_brace) {
-                    if (brace_count > 0) brace_count--;
+            size_t y_start = li_get_offset(E->li, y);
+            size_t y_end = (y + 1 < line_count) ? li_get_offset(E->li, y + 1) : E->pt->total_length;
+            size_t y_len = y_end - y_start;
+            char *line = pt_get_text(E->pt, y_start, y_len);
+            if (!line) continue;
+            
+            for (int i = 0; line[i]; i++) {
+                if (y == E->cy && i < original_cx) continue;
+                
+                if (line[i] == open_brace) depth++;
+                else if (line[i] == close_brace) {
+                    if (depth > 0) depth--;
                     else {
                         E->cx = i;
                         E->cy = y;
                         E->matching_brace_cx = i;
                         E->matching_brace_cy = y;
-                        free(l);
+                        free(line);
                         return;
                     }
                 }
             }
-            free(l);
+            free(line);
         }
     } else {
         for (int y = E->cy; y >= 0; y--) {
-            size_t off = li_get_offset(E->li, y);
-            size_t len = (y + 1 < line_count) ? li_get_offset(E->li, y + 1) - off : E->pt->total_length - off;
-            char *l = pt_get_text(E->pt, off, len);
-            if (!l) continue;
-            int l_len = strlen(l);
-            for (int i = l_len - 1; i >= 0; i--) {
-                if (y == E->cy && i > E->cx) continue;
-                if (l[i] == current_char) brace_count++;
-                else if (l[i] == target_brace) {
-                    if (brace_count > 0) brace_count--;
+            size_t y_start = li_get_offset(E->li, y);
+            size_t y_end = (y + 1 < line_count) ? li_get_offset(E->li, y + 1) : E->pt->total_length;
+            size_t y_len = y_end - y_start;
+            char *line = pt_get_text(E->pt, y_start, y_len);
+            if (!line) continue;
+            
+            int i_max = strlen(line);
+            for (int i = i_max - 1; i >= 0; i--) {
+                if (y == E->cy && i > original_cx) continue;
+                
+                if (line[i] == open_brace) depth++;
+                else if (line[i] == close_brace) {
+                    if (depth > 0) depth--;
                     else {
                         E->cx = i;
                         E->cy = y;
                         E->matching_brace_cx = i;
                         E->matching_brace_cy = y;
-                        free(l);
+                        free(line);
                         return;
                     }
                 }
             }
-            free(l);
+            free(line);
         }
     }
 }
@@ -1448,7 +1469,7 @@ if (c == '\x1b') {
             editor_select_block(E);
             return;
         }
-        if (seq[0] == 'm' || seq[0] == 'j') {
+        if (seq[0] == 'm' || seq[0] == 'M' || seq[0] == 'j') {
             editor_goto_matching_brace(E);
             return;
         }
