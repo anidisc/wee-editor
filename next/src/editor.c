@@ -361,6 +361,50 @@ static bool editor_handle_mouse(Editor *E) {
     return true;
 }
 
+static int is_folded(Editor *E, int line) {
+    for (int i = 0; i < E->fold_count; i++) {
+        if (line > E->folds[i].start && line <= E->folds[i].end) return i;
+    }
+    return -1;
+}
+
+static int logical_to_visual_line(Editor *E, int logical_line) {
+    int visual = 0;
+    for (int i = 0; i < logical_line; i++) {
+        if (is_folded(E, i) < 0) visual++;
+    }
+    return visual;
+}
+
+static int visual_to_logical_line(Editor *E, int visual_line) {
+    int line_count = li_get_line_count(E->li);
+    int current = 0;
+    for (int i = 0; i < line_count && current < visual_line; i++) {
+        int fold_idx = is_folded(E, i);
+        if (fold_idx < 0) current++;
+    }
+    for (int i = 0; i < line_count; i++) {
+        int fold_idx = is_folded(E, i);
+        if (fold_idx < 0 && current == visual_line) return i;
+        if (fold_idx < 0) current++;
+    }
+    return line_count - 1;
+}
+
+static int is_foldable_line(Editor *E, int line) {
+    if (line < 0) return 0;
+    size_t off = li_get_offset(E->li, line);
+    if (off >= E->pt->total_length) return 0;
+    size_t len = (line + 1 < li_get_line_count(E->li)) ? li_get_offset(E->li, line + 1) - off : E->pt->total_length - off;
+    char *l = pt_get_text(E->pt, off, len > 256 ? 256 : len);
+    if (!l) return 0;
+    for (int i = 0; l[i]; i++) {
+        if (l[i] == '{') { free(l); return 1; }
+    }
+    free(l);
+    return 0;
+}
+
 static bool is_char_selected(Editor *E, int row, int col) {
     if (!E->selecting) return false;
     size_t offset = li_get_offset(E->li, row) + col;
@@ -432,6 +476,7 @@ void editor_init(Editor *E) {
     E->tab_size = 4;
     E->dirty = false;
     E->dirty_count = 0;
+    E->fold_count = 0;
     E->line_ending = END_LF;
     E->encoding = ENC_UTF8;
     E->syntax = NULL;
@@ -667,12 +712,19 @@ void editor_replace(EditorManager *em) {
 
 void editor_goto_line(Editor *E) {
     int total_lines = li_get_line_count(E->li);
-    char prompt[128]; snprintf(prompt, sizeof(prompt), "Go to line (1-%d)", total_lines);
+    int visible_lines = 0;
+    for (int i = 0; i < total_lines; i++) {
+        if (is_folded(E, i) < 0) visible_lines++;
+    }
+    char prompt[128]; snprintf(prompt, sizeof(prompt), "Go to line (1-%d)", visible_lines);
     char *input = editor_prompt(E, prompt, NULL);
     if (input) {
         int line = atoi(input);
-        if (line < 1) line = 1; if (line > total_lines) line = total_lines;
-        E->cy = line - 1; E->cx = 0; free(input);
+        if (line < 1) line = 1;
+        int target_logical = visual_to_logical_line(E, line - 1);
+        E->cy = target_logical;
+        E->cx = 0;
+        free(input);
     }
 }
 
@@ -682,9 +734,23 @@ void editor_open_browser(Editor *E) {
     if (selected) { editor_load(E, selected); E->cx = E->cy = 0; E->rowoff = E->coloff = 0; free(selected); }
 }
 
+static int count_visible_lines(Editor *E, int start_line, int end_line) {
+    int count = 0;
+    for (int i = start_line; i <= end_line && i < li_get_line_count(E->li); i++) {
+        int is_hidden = 0;
+        for (int f = 0; f < E->fold_count; f++) {
+            if (i > E->folds[f].start && i <= E->folds[f].end) { is_hidden = 1; break; }
+        }
+        if (!is_hidden) count++;
+    }
+    return count;
+}
+
 void editor_scroll(Editor *E) {
+    int visible = count_visible_lines(E, E->rowoff, E->cy);
+    if (visible <= 0) visible = 1;
     if (E->cy < E->rowoff) E->rowoff = E->cy;
-    if (E->cy >= E->rowoff + E->terminal.screenrows) E->rowoff = E->cy - E->terminal.screenrows + 1;
+    else if (visible > E->terminal.screenrows) E->rowoff = E->cy - E->terminal.screenrows + 1;
     if (E->rx < E->coloff) E->coloff = E->rx;
     if (E->rx >= E->coloff + E->terminal.screencols - (E->show_line_numbers ? 6 : 0)) 
         E->coloff = E->rx - (E->terminal.screencols - (E->show_line_numbers ? 6 : 0)) + 1;
@@ -704,10 +770,16 @@ void editor_refresh_screen(EditorManager *em) {
 
     int total_lines = li_get_line_count(E->li);
     int ln_width = E->show_line_numbers ? snprintf(NULL, 0, "%d", total_lines) + 1 : 0;
-    int wrap_width = E->wrap_enabled ? (E->terminal.screencols - ln_width - 1) : -1;
+    int fold_indic = 0;
+    if (E->fold_count > 0) {
+        for (int i = 0; i < total_lines; i++) {
+            if (is_foldable_line(E, i) || is_folded(E, i) >= 0) { fold_indic = 2; break; }
+        }
+    }
+    int wrap_width = E->wrap_enabled ? (E->terminal.screencols - ln_width - fold_indic - 1) : -1;
 
     editor_scroll(E); 
-    vp_sync(E->vp, E->pt, E->li, E->rowoff, wrap_width);
+    vp_sync(E->vp, E->pt, E->li, E->rowoff, wrap_width, E->folds, E->fold_count);
     
     for (int i = 0; i < E->terminal.screenrows; i++) {
         ViewLine *vl = &E->vp->lines[i]; 
@@ -747,30 +819,55 @@ void editor_refresh_screen(EditorManager *em) {
         
         ViewLine *vl = &E->vp->lines[i];
         abAppend(&ab, "\x1b[m", 3);
+        int row = vl->logical_row;
+        int fold_idx = is_folded(E, row);
+        if (fold_idx >= 0) continue;
         if (E->show_line_numbers) {
             char ln_buf[32];
             if (vl->chars && !vl->is_wrapped) {
                 const char *color = (vl->logical_row == E->cy) ? "\x1b[37m" : "\x1b[90m";
-                int n = snprintf(ln_buf, sizeof(ln_buf), "%s%*d \x1b[m", color, ln_width, vl->logical_row + 1);
-                abAppend(&ab, ln_buf, n);
+                int is_fold_start = 0;
+                for (int f = 0; f < E->fold_count; f++) {
+                    if (E->folds[f].start == vl->logical_row) { is_fold_start = 1; break; }
+                }
+                int foldable = is_foldable_line(E, vl->logical_row);
+                if (is_fold_start) {
+                    int n = snprintf(ln_buf, sizeof(ln_buf), "%s%*d+\x1b[m", color, ln_width, vl->logical_row + 1);
+                    abAppend(&ab, ln_buf, n);
+                } else if (foldable) {
+                    int n = snprintf(ln_buf, sizeof(ln_buf), "%s%*d-\x1b[m", color, ln_width, vl->logical_row + 1);
+                    abAppend(&ab, ln_buf, n);
+                } else {
+                    int n = snprintf(ln_buf, sizeof(ln_buf), "%s%*d \x1b[m", color, ln_width, vl->logical_row + 1);
+                    abAppend(&ab, ln_buf, n);
+                }
             } else if (vl->chars) {
-                int n = snprintf(ln_buf, sizeof(ln_buf), "\x1b[90m%*s \x1b[m", ln_width, " ");
+                int n = snprintf(ln_buf, sizeof(ln_buf), "\x1b[90m%*s\x1b[m", ln_width, " ");
                 abAppend(&ab, ln_buf, n);
             } else {
-                int n = snprintf(ln_buf, sizeof(ln_buf), "\x1b[90m%*s \x1b[m", ln_width, "~");
+                int n = snprintf(ln_buf, sizeof(ln_buf), "\x1b[90m%*s\x1b[m", ln_width, "~");
                 abAppend(&ab, ln_buf, n);
             }
         }
 
         if (vl->chars && vl->visual_len > E->coloff) {
-            int drawlen = vl->visual_len - E->coloff; int effective_cols = E->terminal.screencols - ln_width - 1;
+            int drawlen = vl->visual_len - E->coloff; int effective_cols = E->terminal.screencols - ln_width - fold_indic - 1;
             if (drawlen > effective_cols) drawlen = effective_cols;
             int start_idx = 0; while (start_idx < vl->len && vl->cx_to_rx[start_idx] < E->coloff) start_idx++;
+            int draw_row = vl->logical_row;
+            for (int f = 0; f < E->fold_count; f++) {
+                if (draw_row == E->folds[f].start && E->folds[f].end > draw_row) {
+                    int fold_lines = E->folds[f].end - E->folds[f].start;
+                    char fold_indicator[64];
+                    int n = snprintf(fold_indicator, sizeof(fold_indicator), " \x1b[90m+ %d lines", fold_lines);
+                    abAppend(&ab, fold_indicator, n);
+                    break;
+                }
+            }
             int current_color = -1;
-            int row = vl->logical_row;
             for (int j = start_idx; j < vl->len && vl->cx_to_rx[j] < E->coloff + drawlen; j++) {
                 int color = vl->hl[j];
-                if (is_char_selected(E, row, vl->byte_offset + j)) color = HL_SELECT;
+                if (is_char_selected(E, draw_row, vl->byte_offset + j)) color = HL_SELECT;
                 if (color != current_color) { const char *ansi = hl_to_ansi(color); abAppend(&ab, ansi, (int)strlen(ansi)); current_color = color; }
                 abAppend(&ab, &vl->chars[j], 1);
             }
@@ -803,6 +900,29 @@ void editor_refresh_screen(EditorManager *em) {
     write(STDOUT_FILENO, ab.b, ab.len); abFree(&ab);
 }
 
+static int find_next_visible_line(Editor *E, int from_line) {
+    int line_count = li_get_line_count(E->li);
+    for (int i = from_line + 1; i < line_count; i++) {
+        int is_hidden = 0;
+        for (int f = 0; f < E->fold_count; f++) {
+            if (i > E->folds[f].start && i <= E->folds[f].end) { is_hidden = 1; break; }
+        }
+        if (!is_hidden) return i;
+    }
+    return from_line;
+}
+
+static int find_prev_visible_line(Editor *E, int from_line) {
+    for (int i = from_line - 1; i >= 0; i--) {
+        int is_hidden = 0;
+        for (int f = 0; f < E->fold_count; f++) {
+            if (i > E->folds[f].start && i <= E->folds[f].end) { is_hidden = 1; break; }
+        }
+        if (!is_hidden) return i;
+    }
+    return from_line;
+}
+
 void editor_move_cursor(Editor *E, int key) {
     int line_count = li_get_line_count(E->li);
     int v_idx = -1;
@@ -821,7 +941,9 @@ void editor_move_cursor(Editor *E, int key) {
                 int prev_len = E->vp->lines[v_idx-1].len;
                 E->cx = E->vp->lines[v_idx-1].byte_offset + (rel_off < prev_len ? rel_off : prev_len);
             } else if (E->cy > 0) {
-                E->cy--;
+                int prev = find_prev_visible_line(E, E->cy);
+                if (prev != E->cy) E->cy = prev;
+                else if (E->cy > 0) E->cy--;
                 int len = (int)get_line_len(E, E->cy);
                 if (E->cx > len) E->cx = len;
             }
@@ -832,7 +954,9 @@ void editor_move_cursor(Editor *E, int key) {
                 int next_len = E->vp->lines[v_idx+1].len;
                 E->cx = E->vp->lines[v_idx+1].byte_offset + (rel_off < next_len ? rel_off : next_len);
             } else if (E->cy < line_count - 1) {
-                E->cy++;
+                int next = find_next_visible_line(E, E->cy);
+                if (next != E->cy) E->cy = next;
+                else if (E->cy < line_count - 1) E->cy++;
                 int len = (int)get_line_len(E, E->cy);
                 if (E->cx > len) E->cx = len;
             }
@@ -1059,6 +1183,110 @@ void editor_set_syntax(Editor *E) {
     }
 }
 
+static int find_brace_block_end(Editor *E, int start_line) {
+    int line_count = li_get_line_count(E->li);
+    size_t start_off = li_get_offset(E->li, start_line);
+    char *line = pt_get_text(E->pt, start_off, 256);
+    if (!line) return -1;
+    int has_open_brace = 0;
+    for (int i = 0; line[i]; i++) {
+        if (line[i] == '{') { has_open_brace = 1; break; }
+    }
+    free(line);
+    if (!has_open_brace) return -1;
+    int brace_count = 0;
+    for (int y = start_line; y < line_count; y++) {
+        size_t off = li_get_offset(E->li, y);
+        size_t len = (y + 1 < line_count) ? li_get_offset(E->li, y + 1) - off : E->pt->total_length - off;
+        char *l = pt_get_text(E->pt, off, len > 256 ? 256 : len);
+        if (!l) continue;
+        for (int i = 0; l[i]; i++) {
+            if (l[i] == '{') brace_count++;
+            else if (l[i] == '}') brace_count--;
+        }
+        free(l);
+        if (brace_count == 0 && y > start_line) return y;
+    }
+    return -1;
+}
+
+static int find_fold_containing(Editor *E, int line) {
+    for (int f = 0; f < E->fold_count; f++) {
+        if (line > E->folds[f].start && line <= E->folds[f].end) return f;
+    }
+    return -1;
+}
+
+static int find_next_foldable(Editor *E, int start_line) {
+    int line_count = li_get_line_count(E->li);
+    for (int y = start_line; y < line_count; y++) {
+        size_t off = li_get_offset(E->li, y);
+        if (off >= E->pt->total_length) continue;
+        size_t len = (y + 1 < line_count) ? li_get_offset(E->li, y + 1) - off : E->pt->total_length - off;
+        char *l = pt_get_text(E->pt, off, len > 256 ? 256 : len);
+        if (!l) continue;
+        for (int i = 0; l[i]; i++) {
+            if (l[i] == '{') { free(l); return y; }
+        }
+        free(l);
+    }
+    return -1;
+}
+
+void editor_toggle_fold(Editor *E) {
+    int line_count = li_get_line_count(E->li);
+    if (E->cy >= line_count) return;
+    for (int f = 0; f < E->fold_count; f++) {
+        if (E->cy == E->folds[f].start) {
+            E->fold_count--;
+            for (int i = f; i < E->fold_count; i++) {
+                E->folds[i] = E->folds[i + 1];
+            }
+            return;
+        }
+    }
+    int containing = find_fold_containing(E, E->cy);
+    if (containing >= 0) {
+        int fold_start = E->folds[containing].start;
+        E->fold_count--;
+        for (int i = containing; i < E->fold_count; i++) {
+            E->folds[i] = E->folds[i + 1];
+        }
+        E->cy = fold_start;
+        return;
+    }
+    if (E->fold_count >= MAX_FOLDS) return;
+    int end = find_brace_block_end(E, E->cy);
+    if (end < 0 || end <= E->cy) {
+        int next = find_next_foldable(E, E->cy);
+        if (next < 0) return;
+        end = find_brace_block_end(E, next);
+        if (end < 0 || end <= next) return;
+        E->folds[E->fold_count].start = next;
+        E->folds[E->fold_count].end = end;
+        E->fold_count++;
+    } else {
+        E->folds[E->fold_count].start = E->cy;
+        E->folds[E->fold_count].end = end;
+        E->fold_count++;
+    }
+}
+
+void editor_fold(Editor *E) {
+    int line_count = li_get_line_count(E->li);
+    if (E->cy >= line_count || E->fold_count >= MAX_FOLDS) return;
+    int end = find_brace_block_end(E, E->cy);
+    if (end < 0 || end <= E->cy) return;
+    E->folds[E->fold_count].start = E->cy;
+    E->folds[E->fold_count].end = end;
+    E->fold_count++;
+}
+
+void editor_unfold(Editor *E) {
+    if (E->fold_count == 0) return;
+    E->fold_count--;
+}
+
 void editor_toggle_comment(Editor *E) {
     if (!E->syntax || !E->syntax->singleline_comment_start) return;
     int start_y = E->sel_cy, end_y = E->cy; if (start_y > end_y) { int t = start_y; start_y = end_y; end_y = t; }
@@ -1092,6 +1320,10 @@ if (c == '\x1b') {
         if (n != 1) { E->selecting = false; return; }
         if (seq[0] == 'w') {
             E->wrap_enabled = !E->wrap_enabled; return;
+        }
+        if (seq[0] == 'f') {
+            editor_toggle_fold(E);
+            return;
         }
         if (seq[0] == '[') {
             n = read(STDIN_FILENO, &seq[1], 1);
@@ -1137,7 +1369,11 @@ if (c == '\x1b') {
         case ctrl_key('h'): editor_show_help(E); break;
         case ctrl_key('l'):
             if (!E->selecting) { E->selecting = true; E->sel_cy = E->cy; E->sel_cx = 0; }
-            if (E->cy < li_get_line_count(E->li) - 1) { E->cy++; E->cx = 0; } else E->cx = (int)get_line_len(E, E->cy);
+            if (E->cy < li_get_line_count(E->li) - 1) {
+                int next = find_next_visible_line(E, E->cy);
+                E->cy = next;
+                E->cx = 0;
+            } else E->cx = (int)get_line_len(E, E->cy);
             break;
         case ctrl_key('g'): if (E->last_search) editor_find_next(E, E->last_search, 1); break;
         case ctrl_key('z'): editor_undo(E); break;
@@ -1147,6 +1383,8 @@ if (c == '\x1b') {
         case ctrl_key('v'): editor_paste(E); break;
         case ctrl_key('n'): E->show_line_numbers = !E->show_line_numbers; break;
         case ctrl_key('t'): editor_set_syntax(E); break;
+        case 0x1d: editor_fold(E); break;
+        case 0x1c: editor_unfold(E); break;
         case 127: if (E->selecting) editor_indent_selection(E, -1); else editor_delete_char(E); break;
         default: if (c == '/' && E->selecting) { editor_toggle_comment(E); E->selecting = false; break; }
                  if (!iscntrl(c)) { E->selecting = false; editor_insert_char(E, c); } break;

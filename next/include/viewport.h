@@ -27,7 +27,7 @@ Viewport* vp_create(int rows);
 void vp_destroy(Viewport *vp);
 
 // Sync viewport lines with piece table. 
-// wrap_width: available characters for text. 0 or -1 means no wrap.
-void vp_sync(Viewport *vp, PieceTable *pt, LineIndex *li, int rowoff, int wrap_width);
+// folds is passed as void* to avoid circular dependency with editor.h
+void vp_sync(Viewport *vp, PieceTable *pt, LineIndex *li, int rowoff, int wrap_width, void *folds, int fold_count);
 
 #endif

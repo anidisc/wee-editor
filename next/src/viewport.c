@@ -1,6 +1,7 @@
 #include "viewport.h"
 #include "utf8.h"
 #include "highlight.h"
+#include "editor.h"
 #include <stdlib.h>
 #include <string.h>
 
@@ -56,7 +57,8 @@ static void fill_view_line(ViewLine *vl, const char *text, int len, int logical_
     vl->visual_len = rx;
 }
 
-void vp_sync(Viewport *vp, PieceTable *pt, LineIndex *li, int rowoff, int wrap_width) {
+void vp_sync(Viewport *vp, PieceTable *pt, LineIndex *li, int rowoff, int wrap_width, void *folds, int fold_count) {
+    FoldRegion *fr = (FoldRegion*)folds;
     vp->rowoff = rowoff;
     int line_count = li_get_line_count(li);
     int v_idx = 0;
@@ -65,6 +67,12 @@ void vp_sync(Viewport *vp, PieceTable *pt, LineIndex *li, int rowoff, int wrap_w
     for (int i = 0; i < vp->rows; i++) clear_view_line(&vp->lines[i]);
 
     while (v_idx < vp->rows && l_idx < line_count) {
+        int is_folded = 0;
+        for (int f = 0; f < fold_count; f++) {
+            if (l_idx > fr[f].start && l_idx <= fr[f].end) { is_folded = 1; break; }
+        }
+        if (is_folded) { l_idx++; continue; }
+
         size_t start = li_get_offset(li, l_idx);
         size_t end = (l_idx + 1 < line_count) ? li_get_offset(li, l_idx + 1) : pt->total_length;
         int total_len = (int)(end - start);

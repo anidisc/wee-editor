@@ -10,6 +10,7 @@
 
 #define EDITOR_VERSION "2.17.MM"
 #define MAX_BUFFERS 32
+#define MAX_FOLDS 256
 
 typedef enum {
     END_LF,     // Unix/macOS (\n)
@@ -20,6 +21,11 @@ typedef enum {
     ENC_UTF8,
     END_LATIN1
 } Encoding;
+
+typedef struct {
+    int start;
+    int end;
+} FoldRegion;
 
 typedef struct {
     int cx, cy;      // Logical byte offset in line, logical row index
@@ -41,6 +47,9 @@ typedef struct {
     int tab_size;
     bool dirty;
     int dirty_count; 
+    
+    FoldRegion folds[MAX_FOLDS];
+    int fold_count;
     
     LineEnding line_ending;
     Encoding encoding;
