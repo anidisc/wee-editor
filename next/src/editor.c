@@ -1311,6 +1311,60 @@ found_open:
     }
 }
 
+void editor_goto_matching_brace(Editor *E) {
+    int line_count = li_get_line_count(E->li);
+    size_t current_offset = li_get_offset(E->li, E->cy) + E->cx;
+    char *current_line = pt_get_text(E->pt, li_get_offset(E->li, E->cy), get_line_len(E, E->cy));
+    if (!current_line) return;
+    char current_char = (E->cx >= 0 && E->cx < (int)strlen(current_line)) ? current_line[E->cx] : 0;
+    free(current_line);
+    if (current_char != '{' && current_char != '}' && current_char != '(' && current_char != ')' && current_char != '[' && current_char != ']') return;
+    int target_brace;
+    switch(current_char) {
+        case '{': target_brace = '}'; break;
+        case '(': target_brace = ')'; break;
+        case '[': target_brace = ']'; break;
+        case '}': target_brace = '{'; break;
+        case ')': target_brace = '('; break;
+        case ']': target_brace = '['; break;
+        default: return;
+    }
+    int brace_count = 0;
+    int forward = (current_char == '{' || current_char == '(' || current_char == '[');
+    if (forward) {
+        for (int y = E->cy; y < line_count; y++) {
+            size_t off = li_get_offset(E->li, y);
+            size_t len = (y + 1 < line_count) ? li_get_offset(E->li, y + 1) - off : E->pt->total_length - off;
+            char *l = pt_get_text(E->pt, off, len > 256 ? 256 : len);
+            if (!l) continue;
+            for (int i = 0; l[i]; i++) {
+                if (y == E->cy && i <= E->cx) continue;
+                if (l[i] == current_char) brace_count++;
+                else if (l[i] == target_brace) {
+                    if (brace_count > 0) brace_count--;
+                    else { E->cx = i; E->cy = y; free(l); return; }
+                }
+            }
+            free(l);
+        }
+    } else {
+        for (int y = E->cy; y >= 0; y--) {
+            size_t off = li_get_offset(E->li, y);
+            size_t len = (y + 1 < line_count) ? li_get_offset(E->li, y + 1) - off : E->pt->total_length - off;
+            char *l = pt_get_text(E->pt, off, len > 256 ? 256 : len);
+            if (!l) continue;
+            for (int i = (y == E->cy) ? E->cx : (int)strlen(l) - 1; i >= 0; i--) {
+                if (l[i] == current_char) brace_count++;
+                else if (l[i] == target_brace) {
+                    if (brace_count > 0) brace_count--;
+                    else { E->cx = i; E->cy = y; free(l); return; }
+                }
+            }
+            free(l);
+        }
+    }
+}
+
 void editor_fold(Editor *E) {
     int line_count = li_get_line_count(E->li);
     if (E->cy >= line_count || E->fold_count >= MAX_FOLDS) return;
@@ -1409,6 +1463,7 @@ if (c == '\x1b') {
         case ctrl_key('r'): editor_replace(em); break;
         case ctrl_key('j'): editor_goto_line(E); break;
         case ctrl_key('k'): editor_delete_line(E); break;
+        case ctrl_key('_'): editor_goto_matching_brace(E); break;
         case ctrl_key('o'): {
             char *selected = file_browser_open(E); if (selected) { em_add_buffer(em, selected); free(selected); }
             break;
@@ -1430,7 +1485,6 @@ if (c == '\x1b') {
         case ctrl_key('v'): editor_paste(E); break;
         case ctrl_key('n'): E->show_line_numbers = !E->show_line_numbers; break;
         case ctrl_key('t'): editor_set_syntax(E); break;
-        case 0x1d: editor_fold(E); break;
         case 0x1c: editor_unfold(E); break;
         case 127: if (E->selecting) editor_indent_selection(E, -1); else editor_delete_char(E); break;
         default: if (c == '/' && E->selecting) { editor_toggle_comment(E); E->selecting = false; break; }
