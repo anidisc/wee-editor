@@ -1526,18 +1526,37 @@ if (c == '\x1b') {
                     }
                     
                     if (open_y == close_y) {
-                        E->sel_cx = open_x + 1;
+                        size_t off = li_get_offset(E->li, open_y);
+                        size_t nxt = li_get_offset(E->li, close_y + 1);
+                        char *line = pt_get_text(E->pt, off, nxt - off);
+                        if (!line) return;
+                        int start = open_x + 1;
+                        int line_len = (int)strlen(line);
+                        while (start < line_len - 1 && (line[start] == ' ' || line[start] == '\t')) start++;
+                        int end = line_len - 1;
+                        while (end > start && (line[end] == ' ' || line[end] == '\t')) end--;
+                        E->sel_cx = start;
                         E->sel_cy = open_y;
-                        E->cx = close_x - 1;
+                        E->cx = end;
                         E->cy = close_y;
+                        free(line);
                     } else {
-                        E->sel_cx = open_x + 1;
+                        size_t off = li_get_offset(E->li, open_y);
+                        size_t nxt = li_get_offset(E->li, open_y + 1);
+                        char *first_line = pt_get_text(E->pt, off, nxt - off);
+                        int start = open_x + 1;
+                        if (first_line) {
+                            int len = (int)strlen(first_line);
+                            while (start < len && (first_line[start] == ' ' || first_line[start] == '\t')) start++;
+                            free(first_line);
+                        }
+                        E->sel_cx = start;
                         E->sel_cy = open_y;
                         E->cy = close_y - 1;
-                        int last_line_len = 0;
-                        size_t off = li_get_offset(E->li, E->cy);
-                        size_t nxt = li_get_offset(E->li, close_y);
+                        off = li_get_offset(E->li, E->cy);
+                        nxt = li_get_offset(E->li, close_y);
                         char *last_line = pt_get_text(E->pt, off, nxt - off);
+                        int last_line_len = 0;
                         if (last_line) {
                             last_line_len = (int)strlen(last_line);
                             while (last_line_len > 0 && (last_line[last_line_len - 1] == ' ' || last_line[last_line_len - 1] == '\t')) last_line_len--;
