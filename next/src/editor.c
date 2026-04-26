@@ -859,7 +859,7 @@ void editor_refresh_screen(EditorManager *em) {
                 if (draw_row == E->folds[f].start && E->folds[f].end > draw_row) {
                     int fold_lines = E->folds[f].end - E->folds[f].start;
                     char fold_indicator[64];
-                    int n = snprintf(fold_indicator, sizeof(fold_indicator), " \x1b[90m+ %d lines", fold_lines);
+                    int n = snprintf(fold_indicator, sizeof(fold_indicator), "\x1b[90m... %d lines", fold_lines);
                     abAppend(&ab, fold_indicator, n);
                     break;
                 }
