@@ -1475,6 +1475,60 @@ if (c == '\x1b') {
             }
             return;
         }
+        if (seq[0] == 'b') {
+            int line_count = li_get_line_count(E->li);
+            if (E->cy < 0 || E->cy >= line_count) return;
+            
+            int open_y = -1, open_x = -1;
+            int depth = 0;
+            
+            for (int y = E->cy; y >= 0; y--) {
+                size_t off = li_get_offset(E->li, y);
+                size_t nxt = (y + 1 < line_count) ? li_get_offset(E->li, y + 1) : E->pt->total_length;
+                char *ln = pt_get_text(E->pt, off, nxt - off);
+                if (!ln) continue;
+                int len = (int)strlen(ln);
+                for (int x = len - 1; x >= 0; x--) {
+                    if (ln[x] == '}') depth++;
+                    else if (ln[x] == '{') {
+                        if (depth > 0) depth--;
+                        else { open_y = y; open_x = x; free(ln); goto found_open; }
+                    }
+                }
+                free(ln);
+            }
+            found_open:
+            
+            if (open_y >= 0) {
+                depth = 0;
+                int close_y = -1, close_x = -1;
+                for (int y = open_y; y < line_count; y++) {
+                    size_t off = li_get_offset(E->li, y);
+                    size_t nxt = (y + 1 < line_count) ? li_get_offset(E->li, y + 1) : E->pt->total_length;
+                    char *ln = pt_get_text(E->pt, off, nxt - off);
+                    if (!ln) continue;
+                    for (int x = 0; ln[x]; x++) {
+                        if (y == open_y && x <= open_x) continue;
+                        if (ln[x] == '{') depth++;
+                        else if (ln[x] == '}') {
+                            if (depth > 0) depth--;
+                            else { close_y = y; close_x = x; free(ln); goto found_close; }
+                        }
+                    }
+                    free(ln);
+                }
+                found_close:
+                
+                if (close_y >= 0) {
+                    E->sel_cx = open_x + 1;
+                    E->sel_cy = open_y;
+                    E->cx = close_x - 1;
+                    E->cy = close_y;
+                    E->selecting = true;
+                }
+            }
+            return;
+        }
         if (seq[0] == '[') {
             n = read(STDIN_FILENO, &seq[1], 1);
             if (n != 1) { E->selecting = false; return; }
