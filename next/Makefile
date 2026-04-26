@@ -1,4 +1,17 @@
-CC = gcc
+UNAME_S := $(shell uname -s)
+UNAME_P := $(shell uname -m)
+
+ifeq ($(UNAME_P),aarch64)
+    ARCH = arm64
+    CC = gcc
+else ifeq ($(findstring arm,$(UNAME_P)),arm)
+    ARCH = arm
+    CC = gcc
+else
+    ARCH = x86_64
+    CC = gcc
+endif
+
 CFLAGS = -Wall -Wextra -std=c11 -Iinclude -g
 LDFLAGS = -lm
 
@@ -11,9 +24,12 @@ OBJS = $(SRCS:$(SRC_DIR)/%.c=$(OBJ_DIR)/%.o)
 
 TARGET = wee-next
 
-.PHONY: all clean
+.PHONY: all clean arch
 
-all: $(TARGET)
+all: arch $(TARGET)
+
+arch:
+	@echo "Building for architecture: $(ARCH)"
 
 $(TARGET): $(OBJS)
 	$(CC) $(OBJS) -o $@ $(LDFLAGS)
