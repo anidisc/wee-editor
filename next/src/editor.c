@@ -1318,35 +1318,48 @@ found_open:
 
 void editor_goto_matching_brace(Editor *E) {
     int line_count = li_get_line_count(E->li);
-    char *current_line = pt_get_text(E->pt, li_get_offset(E->li, E->cy), get_line_len(E, E->cy));
+    size_t line_start = li_get_offset(E->li, E->cy);
+    size_t line_len = (E->cy + 1 < line_count) ? li_get_offset(E->li, E->cy + 1) - line_start : E->pt->total_length - line_start;
+    if (line_len == 0) return;
+    char *current_line = pt_get_text(E->pt, line_start, line_len);
     if (!current_line) return;
-    char current_char = (E->cx >= 0 && E->cx < (int)strlen(current_line)) ? current_line[E->cx] : 0;
+    if (E->cx >= (int)line_len) E->cx = line_len - 1;
+    char current_char = current_line[E->cx];
     free(current_line);
     if (current_char != '{' && current_char != '}' && current_char != '(' && current_char != ')' && current_char != '[' && current_char != ']') return;
-    int target_brace;
-    switch(current_char) {
-        case '{': target_brace = '}'; break;
-        case '(': target_brace = ')'; break;
-        case '[': target_brace = ']'; break;
-        case '}': target_brace = '{'; break;
-        case ')': target_brace = '('; break;
-        case ']': target_brace = '['; break;
-        default: return;
-    }
-    int brace_count = 0;
+    int target_brace = 0;
+    if (current_char == '{') target_brace = '}';
+    else if (current_char == '(') target_brace = ')';
+    else if (current_char == '[') target_brace = ']';
+    else if (current_char == '}') target_brace = '{';
+    else if (current_char == ')') target_brace = '(';
+    else if (current_char == ']') target_brace = '[';
+    if (target_brace == 0) return;
+    int original_cx = E->cx;
+    int original_cy = E->cy;
+    E->matching_brace_cx = original_cx;
+    E->matching_brace_cy = original_cy;
     int forward = (current_char == '{' || current_char == '(' || current_char == '[');
+    int brace_count = 0;
     if (forward) {
         for (int y = E->cy; y < line_count; y++) {
             size_t off = li_get_offset(E->li, y);
             size_t len = (y + 1 < line_count) ? li_get_offset(E->li, y + 1) - off : E->pt->total_length - off;
-            char *l = pt_get_text(E->pt, off, len > 256 ? 256 : len);
+            char *l = pt_get_text(E->pt, off, len);
             if (!l) continue;
             for (int i = 0; l[i]; i++) {
                 if (y == E->cy && i < E->cx) continue;
                 if (l[i] == current_char) brace_count++;
                 else if (l[i] == target_brace) {
                     if (brace_count > 0) brace_count--;
-                    else { E->cx = i; E->cy = y; E->matching_brace_cx = i; E->matching_brace_cy = y; free(l); return; }
+                    else {
+                        E->cx = i;
+                        E->cy = y;
+                        E->matching_brace_cx = i;
+                        E->matching_brace_cy = y;
+                        free(l);
+                        return;
+                    }
                 }
             }
             free(l);
@@ -1355,14 +1368,22 @@ void editor_goto_matching_brace(Editor *E) {
         for (int y = E->cy; y >= 0; y--) {
             size_t off = li_get_offset(E->li, y);
             size_t len = (y + 1 < line_count) ? li_get_offset(E->li, y + 1) - off : E->pt->total_length - off;
-            char *l = pt_get_text(E->pt, off, len > 256 ? 256 : len);
+            char *l = pt_get_text(E->pt, off, len);
             if (!l) continue;
-            for (int i = (int)strlen(l) - 1; i >= 0; i--) {
+            int l_len = strlen(l);
+            for (int i = l_len - 1; i >= 0; i--) {
                 if (y == E->cy && i > E->cx) continue;
                 if (l[i] == current_char) brace_count++;
                 else if (l[i] == target_brace) {
                     if (brace_count > 0) brace_count--;
-                    else { E->cx = i; E->cy = y; E->matching_brace_cx = i; E->matching_brace_cy = y; free(l); return; }
+                    else {
+                        E->cx = i;
+                        E->cy = y;
+                        E->matching_brace_cx = i;
+                        E->matching_brace_cy = y;
+                        free(l);
+                        return;
+                    }
                 }
             }
             free(l);
@@ -1427,11 +1448,7 @@ if (c == '\x1b') {
             editor_select_block(E);
             return;
         }
-        if (seq[0] == 'm') {
-            editor_goto_matching_brace(E);
-            return;
-        }
-        if (seq[0] == 'j') {
+        if (seq[0] == 'm' || seq[0] == 'j') {
             editor_goto_matching_brace(E);
             return;
         }
